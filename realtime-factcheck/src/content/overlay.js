@@ -20,6 +20,9 @@ let transcriptCollapsed = false;
 const pendingCards    = new Map();
 const pendingCardTimes = new Map();
 
+const RUNTIME_ERROR_KEYS = ['rtfcLastPipelineError', 'rtfcLastPipelineErrorAt'];
+let lastRuntimeError = null;
+
 // expire pending cards after 90 seconds
 setInterval(() => {
   const now = Date.now();
@@ -258,8 +261,38 @@ function renderSpeakerEditor() {
 
 // ── Error toast ──────────────────────────────────────────────────────────────
 
-function showError(message) {
+function isFatalError(message) {
+  return /failed|fail|error|key|api|endpoint|absent|missing|échou|erreur|clé|absente|manqu/i.test(String(message || ''));
+}
+
+function persistRuntimeError(message) {
+  const normalized = String(message || 'Erreur pipeline inconnue.').trim();
+  const at = Date.now();
+  lastRuntimeError = { message: normalized, timestamp: at };
+  chrome.storage.local.set({
+    rtfcLastPipelineError: normalized,
+    rtfcLastPipelineErrorAt: at,
+  });
+}
+
+function clearRuntimeErrorStorage() {
+  lastRuntimeError = null;
+  chrome.storage.local.remove(RUNTIME_ERROR_KEYS);
+}
+
+function showError(message, opts) {
+  opts = opts || {};
+  const normalized = String(message || 'Erreur pipeline inconnue.').trim();
+
+  if (opts.persist !== false) {
+    persistRuntimeError(normalized);
+  }
+
+  if (!panel) {
+    createPanel();
+  }
   if (!panel) return;
+
   const existing = panel.querySelector('.rtfc-error-toast');
   if (existing) existing.remove();
 
@@ -267,18 +300,17 @@ function showError(message) {
   toast.className = 'rtfc-error-toast';
   toast.innerHTML =
     '<span class="rtfc-error-icon">⚠</span>' +
-    '<span class="rtfc-error-msg">' + escapeHtml(message) + '</span>' +
+    '<span class="rtfc-error-msg">' + escapeHtml(normalized) + '</span>' +
     '<button class="rtfc-error-close">✕</button>';
 
   toast.querySelector('.rtfc-error-close').addEventListener('click', () => toast.remove());
   panel.querySelector('#rtfc-header').insertAdjacentElement('afterend', toast);
 
-  // auto-dismiss after 8 seconds unless it's a fatal error
-  if (!message.includes('failed') && !message.includes('key')) {
+  // auto-dismiss after 8 seconds unless it looks like a fatal configuration/API error
+  if (!isFatalError(normalized)) {
     setTimeout(() => toast.remove(), 8000);
   }
 }
-
 // ── Panel ─────────────────────────────────────────────────────────────────────
 function createPanel() {
   if (panel) return;
@@ -326,6 +358,10 @@ function createPanel() {
   interimEl        = panel.querySelector('#rtfc-interim');
   claimFeedEl      = panel.querySelector('#rtfc-claim-feed');
   verdictListEl    = panel.querySelector('#rtfc-verdicts');
+
+  if (lastRuntimeError?.message) {
+    showError(lastRuntimeError.message, { persist: false });
+  }
 
   panel.querySelector('#rtfc-close').addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'STOP_FACTCHECK' });
@@ -619,12 +655,14 @@ function makeDraggable(panel) {
   document.addEventListener('mouseup', () => { isDragging = false; header.style.cursor = 'grab'; });
 }
 
+
 // ── Messages ──────────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg) => {
   console.log('[overlay] message received:', msg.type);
   switch (msg.type) {
 
     case 'START_FACTCHECK':
+      clearRuntimeErrorStorage();
       createPanel();
       startSession();
       speakers = parseSpeakersFromTitle(document.title || '');
@@ -643,6 +681,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 
     case 'STOP_FACTCHECK':
       stopSession();
+      clearRuntimeErrorStorage();
       removePanel();
       break;
 
@@ -672,6 +711,19 @@ chrome.runtime.onMessage.addListener((msg) => {
 
     case 'PIPELINE_ERROR':
       showError(msg.message || 'An error occurred in the fact-checking pipeline.');
+      break;
+
+    case 'CAPTURE_ERROR':
+      showError(msg.message || msg.error || 'Erreur de capture audio.');
+      break;
+
+    case 'PIPELINE_DEBUG':
+      // Debug UI désactivé pour la version propre.
+      break;
+
+    case 'PIPELINE_OK':
+    case 'PIPELINE_RECOVERED':
+      clearRuntimeErrorStorage();
       break;
 
     case 'NEW_VERDICT':
