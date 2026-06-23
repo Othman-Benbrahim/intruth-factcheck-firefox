@@ -10,6 +10,9 @@ const modelLabel   = document.getElementById('modelLabel');
 const apiKeyEl     = document.getElementById('llmApiKey');
 const apiKeyLabel  = document.getElementById('apiKeyLabel');
 const deepgramEl   = document.getElementById('deepgramKey');
+const reasoningEl  = document.getElementById('llmReasoning');
+const reasoningField = document.getElementById('reasoningField');
+const rememberEl   = document.getElementById('rememberKeys');
 const keyHint      = document.getElementById('keyHint');
 const keysSection  = document.getElementById('keysSection');
 const runtimeErrorEl = document.getElementById('runtimeError');
@@ -23,24 +26,96 @@ let lastValidation = { state: 'idle', ok: null, message: 'Validation non lancée
 
 const RUNTIME_ERROR_KEYS = ['rtfcLastPipelineError', 'rtfcLastPipelineErrorAt'];
 
+// Clés "coordonnées" persistées selon le choix de mémorisation.
+const SECRET_KEYS = ['llmEndpoint', 'llmModel', 'llmApiKey', 'deepgramKey'];
+
+function rememberEnabled() { return !rememberEl || rememberEl.checked; }
+
+// Mémorisation ON  -> storage.local  (persistant)
+// Mémorisation OFF -> storage.session (session courante uniquement, hors disque)
+function persistKeys(obj) {
+  if (rememberEnabled()) {
+    chrome.storage.local.set(obj);
+    try { chrome.storage.session?.remove(Object.keys(obj)); } catch (_) {}
+  } else {
+    try { chrome.storage.session?.set(obj); } catch (_) {}
+    chrome.storage.local.remove(Object.keys(obj));
+  }
+}
+
+function collectSecretKeys() {
+  return {
+    llmEndpoint: endpointEl.value.trim(),
+    llmModel:    modelEl.value.trim(),
+    llmApiKey:   apiKeyEl.value.trim(),
+    deepgramKey: deepgramEl.value.trim(),
+  };
+}
+
+// Sauvegarde tout avant le lancement et attend que l'écriture soit faite,
+// pour que le service-worker relise des clés à jour dans loadKeys().
+function saveAllForStart() {
+  chrome.storage.local.set({
+    llmProvider: providerEl.value,
+    llmReasoning: reasoningEl ? reasoningEl.checked : false,
+    rememberKeys: rememberEnabled(),
+  });
+  const keys = collectSecretKeys();
+  return new Promise((resolve) => {
+    if (rememberEnabled()) {
+      chrome.storage.local.set(keys, () => {
+        try { chrome.storage.session?.remove(Object.keys(keys)); } catch (_) {}
+        resolve();
+      });
+    } else {
+      try {
+        chrome.storage.session.set(keys, () => {
+          chrome.storage.local.remove(Object.keys(keys), () => resolve());
+        });
+      } catch (_) { resolve(); }
+    }
+  });
+}
+
 // ── Load saved settings ───────────────────────────────────────────────────────
 
 chrome.storage.local.get(
-  ['llmProvider', 'llmEndpoint', 'llmModel', 'llmApiKey', 'anthropicKey', 'deepgramKey', ...RUNTIME_ERROR_KEYS],
+  ['llmProvider', 'llmEndpoint', 'llmModel', 'llmApiKey', 'anthropicKey', 'deepgramKey',
+   'llmReasoning', 'rememberKeys', ...RUNTIME_ERROR_KEYS],
   (data) => {
+    const remember = data.rememberKeys !== false; // défaut : mémorisation activée
+    if (rememberEl)  rememberEl.checked  = remember;
+    if (reasoningEl) reasoningEl.checked = data.llmReasoning === true;
+
     providerEl.value = data.llmProvider || 'anthropic';
-    if (data.llmEndpoint) endpointEl.value = data.llmEndpoint;
-    if (data.llmModel)    modelEl.value    = data.llmModel;
-    // rétro-compat : ancienne clé Anthropic réutilisée comme clé LLM
-    if (data.llmApiKey)        apiKeyEl.value = data.llmApiKey;
-    else if (data.anthropicKey) apiKeyEl.value = data.anthropicKey;
-    if (data.deepgramKey) { deepgramEl.value = data.deepgramKey; deepgramEl.classList.add('saved'); }
+
+    const applyFields = (src) => {
+      if (src.llmEndpoint) endpointEl.value = src.llmEndpoint;
+      if (src.llmModel)    modelEl.value    = src.llmModel;
+      // rétro-compat : ancienne clé Anthropic réutilisée comme clé LLM
+      if (src.llmApiKey)         apiKeyEl.value = src.llmApiKey;
+      else if (data.anthropicKey) apiKeyEl.value = data.anthropicKey;
+      if (src.deepgramKey) { deepgramEl.value = src.deepgramKey; deepgramEl.classList.add('saved'); }
+    };
+
     if (data.rtfcLastPipelineError) {
       setRuntimeError(data.rtfcLastPipelineError, data.rtfcLastPipelineErrorAt, { persist: false });
     }
-    applyProviderUI();
-    updateHint();
-    scheduleKeyValidation();
+
+    const finish = () => { applyProviderUI(); updateHint(); scheduleKeyValidation(); };
+
+    if (remember) {
+      applyFields(data);
+      finish();
+    } else {
+      // mémorisation désactivée : les clés sont en storage.session
+      try {
+        chrome.storage.session.get(SECRET_KEYS, (sess) => { applyFields(sess || {}); finish(); });
+      } catch (_) {
+        applyFields({});
+        finish();
+      }
+    }
   }
 );
 
@@ -49,6 +124,7 @@ chrome.storage.local.get(
 function applyProviderUI() {
   const openai = providerEl.value === 'openai';
   endpointField.style.display = openai ? 'flex' : 'none';
+  if (reasoningField) reasoningField.style.display = openai ? 'flex' : 'none';
   apiKeyLabel.textContent = openai ? 'Clé API (facultative pour LM Studio local)' : 'Clé API Anthropic';
   modelLabel.textContent  = openai ? 'Modèle (identifiant)' : 'Modèle Anthropic (optionnel)';
   modelEl.placeholder     = openai ? 'ex. gpt-4o-mini / nom-du-modèle-local' : 'claude-haiku-4-5-20251001';
@@ -73,7 +149,7 @@ function bindSave(el, key, opts) {
     scheduleKeyValidation();
   });
   el.addEventListener('change', () => {
-    chrome.storage.local.set({ [key]: el.value.trim() });
+    persistKeys({ [key]: el.value.trim() });
     el.classList.add('saved');
     updateHint();
     scheduleKeyValidation(250);
@@ -83,6 +159,30 @@ bindSave(endpointEl, 'llmEndpoint');
 bindSave(modelEl,    'llmModel');
 bindSave(apiKeyEl,   'llmApiKey');
 bindSave(deepgramEl, 'deepgramKey');
+
+// Mode reasoning (préférence non secrète → toujours en local)
+if (reasoningEl) {
+  reasoningEl.addEventListener('change', () => {
+    chrome.storage.local.set({ llmReasoning: reasoningEl.checked });
+    scheduleKeyValidation(250);
+  });
+}
+
+// Mémorisation des clés : bascule local <-> session selon l'état de la case
+if (rememberEl) {
+  rememberEl.addEventListener('change', () => {
+    const remember = rememberEl.checked;
+    chrome.storage.local.set({ rememberKeys: remember });
+    const keys = collectSecretKeys();
+    if (remember) {
+      chrome.storage.local.set(keys);
+      try { chrome.storage.session?.remove(Object.keys(keys)); } catch (_) {}
+    } else {
+      try { chrome.storage.session?.set(keys); } catch (_) {}
+      chrome.storage.local.remove(Object.keys(keys));
+    }
+  });
+}
 
 // ── Validation / hint ─────────────────────────────────────────────────────────
 
@@ -108,6 +208,7 @@ function currentConfig() {
     llmModel: modelEl.value.trim(),
     llmApiKey: apiKeyEl.value.trim(),
     deepgramKey: deepgramEl.value.trim(),
+    llmReasoning: reasoningEl ? reasoningEl.checked : false,
   };
 }
 
@@ -306,7 +407,7 @@ toggleBtn.addEventListener('click', async () => {
 
   // save everything, validate, then start
   clearRuntimeError();
-  await new Promise(r => chrome.storage.local.set(currentConfig(), r));
+  await saveAllForStart();
 
   if (lastValidation.ok !== true) {
     await new Promise((resolve) => {

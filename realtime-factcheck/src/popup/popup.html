@@ -34,6 +34,16 @@
         <input class="key-input" id="llmModel" type="text" placeholder="claude-haiku-4-5-20251001" autocomplete="off"/>
       </div>
 
+      <div class="key-field" id="reasoningField" style="display:none;">
+        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:11px;color:#bbb;">
+          <input type="checkbox" id="llmReasoning" style="width:auto;margin:0;cursor:pointer;"/>
+          Modèle « reasoning » (o-series, DeepSeek-R1…)
+        </label>
+        <div style="font-size:10px;color:#777;line-height:1.4;margin-top:3px;">
+          Coche si le modèle « réfléchit » avant de répondre : on retire alors la température et on élargit le budget de tokens.
+        </div>
+      </div>
+
       <div class="key-field">
         <label class="key-label" id="apiKeyLabel">Clé API</label>
         <input class="key-input" id="llmApiKey" type="password" placeholder="sk-..." autocomplete="off"/>
@@ -42,6 +52,16 @@
       <div class="key-field">
         <label class="key-label">Deepgram API Key</label>
         <input class="key-input" id="deepgramKey" type="password" placeholder="Clé API Deepgram..." autocomplete="off"/>
+      </div>
+
+      <div class="key-field">
+        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:11px;color:#bbb;">
+          <input type="checkbox" id="rememberKeys" style="width:auto;margin:0;cursor:pointer;"/>
+          Se souvenir de mes clés sur ce navigateur
+        </label>
+        <div style="font-size:10px;color:#777;line-height:1.4;margin-top:3px;">
+          Décoché : les clés ne sont gardées que pour la session en cours (jamais écrites sur le disque).
+        </div>
       </div>
 
       <div class="key-hint" id="keyHint"></div>
