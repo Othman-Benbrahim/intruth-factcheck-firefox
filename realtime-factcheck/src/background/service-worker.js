@@ -34,6 +34,23 @@ let pipelineHealthy  = true;
 let llmHealthy       = true;
 let lastPipelineError = null;
 
+// Diagnostic léger : permet de savoir si l'analyse est appelée, si le LLM répond,
+// et où le pipeline se coupe, sans bloquer définitivement la session.
+let lastAnalysisDebug = null;
+let lastLLMWarning = null;
+let analysisAttemptCount = 0;
+let llmFailureCount = 0;
+
+const LLM_MAX_RETRIES = 2;
+const LLM_RETRY_BASE_DELAY_MS = 700;
+
+// Réglages anti-troncature : on force le LLM à répondre court et on découpe
+// la fenêtre de transcript en mini-lots pour éviter les JSON incomplets.
+const LLM_ANALYSIS_MAX_TOKENS = 1400;
+const LLM_MAX_CLAIMS_PER_BATCH = 1;
+const LLM_BATCH_CHAR_LIMIT = 900;
+const LLM_MAX_BATCHES_PER_WINDOW = 4;
+
 const PIPELINE_ERROR_STORAGE_KEYS = [
   'rtfcLastPipelineError',
   'rtfcLastPipelineErrorAt',
@@ -71,6 +88,53 @@ function broadcastRuntime(payload) {
   catch (_) {}
 }
 
+function setAnalysisDebug(stage, details = {}) {
+  // Debug UI désactivé pour la version propre.
+  // On conserve seulement le dernier état en mémoire pour GET_STATUS / diagnostic éventuel,
+  // mais on n'envoie plus de PIPELINE_DEBUG à l'overlay ni à la popup.
+  lastAnalysisDebug = {
+    stage,
+    at: Date.now(),
+    ...details,
+  };
+}
+
+
+let lastDeepgramDebugAt = 0;
+let lastDeepgramDebugSignature = '';
+
+function setDeepgramSignalDebug(stage, details = {}) {
+  const now = Date.now();
+  const signature = [
+    stage,
+    details.is_final,
+    details.speech_final,
+    details.textPreview,
+    details.utteranceBufferChars,
+    details.sentenceWindowSize,
+    details.sentenceCount,
+  ].join('|');
+
+  // Les signaux interim peuvent arriver très vite : on les limite pour éviter
+  // de saturer l'overlay. Les signaux finaux et speech_final passent toujours.
+  const isImportant =
+    stage !== 'deepgram_interim' ||
+    details.is_final === true ||
+    details.speech_final === true;
+
+  if (!isImportant && signature === lastDeepgramDebugSignature && now - lastDeepgramDebugAt < 900) {
+    return;
+  }
+
+  if (!isImportant && now - lastDeepgramDebugAt < 900) {
+    return;
+  }
+
+  lastDeepgramDebugAt = now;
+  lastDeepgramDebugSignature = signature;
+  setAnalysisDebug(stage, details);
+}
+
 function notifyPipelineError(message, source = 'pipeline', options = {}) {
   const fatal = options.fatal !== false;
   const cleanMessage = String(message || 'Erreur pipeline inconnue.').trim() || 'Erreur pipeline inconnue.';
@@ -86,6 +150,10 @@ function notifyPipelineError(message, source = 'pipeline', options = {}) {
     if (source === 'llm') llmHealthy = false;
     lastPipelineError = errorInfo;
     persistPipelineError(errorInfo);
+  } else {
+    // Non fatal : on garde l'avertissement pour diagnostic, mais on ne bloque pas
+    // la session ni le bouton Start.
+    if (source === 'llm' || source === 'pipeline') lastLLMWarning = errorInfo;
   }
 
   const payload = {
@@ -99,13 +167,14 @@ function notifyPipelineError(message, source = 'pipeline', options = {}) {
   };
 
   sendToActiveTab(payload);
-  if (fatal) broadcastRuntime(payload);
+  broadcastRuntime(payload);
 }
 
 function clearPipelineError(reason = 'pipeline') {
   pipelineHealthy = true;
   llmHealthy = true;
   lastPipelineError = null;
+  lastLLMWarning = null;
   clearStoredPipelineError();
 
   const payload = {
@@ -137,6 +206,10 @@ function buildStatusResponse() {
     pipelineError,
     error: pipelineError,
     lastPipelineError,
+    lastLLMWarning,
+    lastAnalysisDebug,
+    analysisAttemptCount,
+    llmFailureCount,
   };
 }
 
@@ -194,35 +267,39 @@ async function validateAnthropicKey(config) {
         model: config.model || DEFAULT_ANTHROPIC_MODEL,
         max_tokens: 160,
         temperature: 0,
-        system: 'Return only valid JSON. No Markdown. No extra text.',
+        system: 'Return a short plain text answer.',
         messages: [{
           role: 'user',
-          content: 'Health check: return exactly this JSON array with no extra text: [{"claim":"The sky is blue.","claim_fr":"Le ciel est bleu.","claim_en":"The sky is blue.","verdict":"TRUE","speaker":"Unknown","explanation":"Basic factual test.","confidence":0.9}]',
+          content: 'Health check. Reply with OK.',
         }],
       }),
     });
 
     if (!res.ok || data?.error) {
-      const apiMessage = data?.error?.message || data?.error || ('HTTP ' + res.status);
-      return { ok: false, source: 'llm', message: 'Anthropic invalide : ' + apiMessage };
+      const apiMessage = extractAPIErrorMessage(data) || ('HTTP ' + res.status);
+      return { ok: false, source: 'llm', message: 'Anthropic invalide : HTTP ' + res.status + ' — ' + apiMessage };
     }
-    const content = stripFences(data?.content?.[0]?.text || '');
-    const parsed = parseArrayWithDiagnostics(content);
-    if (!parsed.ok || !parsed.results.length) {
+
+    const extracted = extractAnthropicContent(data);
+    if (!extracted.content) {
       return {
         ok: false,
         source: 'llm',
-        message: 'Anthropic joignable, mais format JSON d’analyse non conforme.',
-        details: parsed.rawPreview,
+        message: 'Anthropic joignable, mais contenu texte introuvable. Format détecté : ' + describeLLMShape(data),
       };
     }
 
-    return { ok: true, source: 'llm', message: 'Clé Anthropic valide et format JSON compatible.' };
+    return {
+      ok: true,
+      source: 'llm',
+      message: 'Clé Anthropic valide. Réponse lue via ' + extracted.path + '.',
+    };
   } catch (err) {
     const suffix = err?.name === 'AbortError' ? 'délai dépassé' : err.message;
     return { ok: false, source: 'llm', message: 'Anthropic injoignable : ' + suffix };
   }
 }
+
 
 async function validateOpenAICompatibleKey(config) {
   if (!config.endpoint) {
@@ -233,11 +310,11 @@ async function validateOpenAICompatibleKey(config) {
   }
 
   try {
-    const base = config.endpoint.replace(/\/+$/, '');
+    const url = buildOpenAIChatCompletionsUrl(config.endpoint);
     const headers = { 'Content-Type': 'application/json' };
     if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
 
-    const { res, data } = await fetchJsonForValidation(base + '/chat/completions', {
+    const { res, data } = await fetchJsonForValidation(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -245,40 +322,44 @@ async function validateOpenAICompatibleKey(config) {
         max_tokens: 160,
         temperature: 0,
         messages: [
-          { role: 'system', content: 'Return only valid JSON. No Markdown. No extra text.' },
-          { role: 'user', content: 'Health check: return exactly this JSON array with no extra text: [{"claim":"The sky is blue.","claim_fr":"Le ciel est bleu.","claim_en":"The sky is blue.","verdict":"TRUE","speaker":"Unknown","explanation":"Basic factual test.","confidence":0.9}]' },
+          { role: 'system', content: 'Return a short plain text answer.' },
+          { role: 'user', content: 'Health check. Reply with OK.' },
         ],
       }),
     });
 
     if (!res.ok || data?.error) {
-      const apiMessage = typeof data?.error === 'string'
-        ? data.error
-        : (data?.error?.message || ('HTTP ' + res.status));
-      return { ok: false, source: 'llm', message: 'Endpoint LLM invalide : ' + apiMessage };
-    }
-
-    const content = data?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') {
-      return { ok: false, source: 'llm', message: 'Endpoint LLM joignable, mais réponse inattendue.' };
-    }
-
-    const parsed = parseArrayWithDiagnostics(content);
-    if (!parsed.ok || !parsed.results.length) {
+      const apiMessage = extractAPIErrorMessage(data) || ('HTTP ' + res.status);
       return {
         ok: false,
         source: 'llm',
-        message: 'Endpoint LLM joignable, mais format JSON d’analyse non conforme.',
-        details: parsed.rawPreview,
+        message: 'Endpoint LLM invalide : HTTP ' + res.status + ' — ' + apiMessage,
       };
     }
 
-    return { ok: true, source: 'llm', message: 'Endpoint LLM valide et format JSON compatible.' };
+    const extracted = extractOpenAICompatibleContent(data);
+    const content = extracted.content;
+    if (!content) {
+      return {
+        ok: false,
+        source: 'llm',
+        message:
+          'Endpoint LLM joignable, mais contenu texte introuvable. Format détecté : ' +
+          describeLLMShape(data),
+      };
+    }
+
+    return {
+      ok: true,
+      source: 'llm',
+      message: 'Endpoint LLM valide. Réponse lue via ' + extracted.path + '.',
+    };
   } catch (err) {
     const suffix = err?.name === 'AbortError' ? 'délai dépassé' : err.message;
     return { ok: false, source: 'llm', message: 'Endpoint LLM injoignable : ' + suffix };
   }
 }
+
 
 async function validateDeepgramKey(deepgramKey) {
   if (!deepgramKey) {
@@ -348,12 +429,16 @@ async function validateKeysBeforeStart(configFromPopup = {}) {
   const [llm, deepgram] = await Promise.all([llmPromise, deepgramPromise]);
   const checks = { llm, deepgram };
   const errors = [llm, deepgram].filter(r => !r.ok).map(r => r.message);
+  const warnings = [llm, deepgram].filter(r => r.ok && r.warning).map(r => r.message);
   const ok = errors.length === 0;
 
   if (ok) {
     return {
       ok: true,
-      message: 'Clés valides : LLM et Deepgram opérationnels.',
+      message: warnings.length
+        ? 'Clés valides. Avertissement : ' + warnings.join(' | ')
+        : 'Clés valides : LLM et Deepgram opérationnels.',
+      warnings,
       checks,
       checkedAt: Date.now(),
     };
@@ -362,6 +447,7 @@ async function validateKeysBeforeStart(configFromPopup = {}) {
   return {
     ok: false,
     message: errors.join(' | '),
+    warnings,
     checks,
     checkedAt: Date.now(),
   };
@@ -383,30 +469,35 @@ async function loadKeys() {
 const EVALUATE_PROMPT = `
 You are a bilingual real-time fact-checking assistant.
 The transcript may be in English, French, or a mix of both.
-Your job is to detect factual claims in either language, evaluate them, and return bilingual claim translations.
+
+Return ONLY valid JSON.
+No Markdown. No code fences. No comments. No text before or after JSON.
+
+Important anti-truncation rules:
+- Return at most ${LLM_MAX_CLAIMS_PER_BATCH} factual claim per response.
+- Prefer the clearest, most checkable claim.
+- Keep all fields short.
+- If there is no clear factual claim, return [].
+- Do not include long quotes from the transcript.
+- Do not create multiple objects unless explicitly unavoidable.
+
+Return a JSON array using exactly this compact shape:
+[
+  {
+    "claim": "short original factual claim",
+    "claim_fr": "short French version",
+    "claim_en": "short English version",
+    "verdict": "TRUE | SUBSTANTIALLY TRUE | FALSE | MISLEADING | UNVERIFIABLE",
+    "speaker": "identified speaker name or Unknown",
+    "explanation": "one short sentence",
+    "confidence": 0.0
+  }
+]
 
 Rules:
 - Understand French and English directly.
-- If the claim is in French, keep the original French text in "claim" and provide an English translation in "claim_en".
-- If the claim is in English, keep the original English text in "claim" and provide a French translation in "claim_fr".
-- If the claim mixes French and English, keep the mixed original text in "claim" and provide both "claim_fr" and "claim_en" when useful.
-- Do not translate proper names, organization names, laws, places, or technical terms when that would distort the meaning.
+- Ignore opinions, jokes, filler, greetings, vague claims, and claims that cannot be checked.
 - Evaluate claims as they were made at the time of the recording when a date is provided.
-- Ignore purely subjective opinions, jokes, filler, greetings, and vague claims that cannot be fact-checked.
-- Return only valid JSON. No Markdown. No code fences. No extra text.
-
-Return a JSON array. Each object must follow this shape:
-{
-  "claim": "original factual claim, in the source language",
-  "claim_fr": "French translation or French original when available",
-  "claim_en": "English translation or English original when available",
-  "verdict": "TRUE | SUBSTANTIALLY TRUE | FALSE | MISLEADING | UNVERIFIABLE",
-  "speaker": "identified speaker name or Unknown",
-  "explanation": "short explanation in the same language as the claim when possible",
-  "confidence": 0.0
-}
-
-If there is no factual claim, return [].
 `;
 
 // ── Speaker parsing (mirrors overlay.js) ─────────────────────────────────────
@@ -468,15 +559,60 @@ function stripFences(raw) {
   return (raw || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
 }
 
-function reportLLMError(msg) {
+function reportLLMError(msg, options = {}) {
   console.error('[llm] API error:', msg);
-  notifyPipelineError(msg, 'llm', { fatal: true });
+  notifyPipelineError(msg, 'llm', { fatal: options.fatal !== false });
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryableLLMError(err) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return /429|rate|limit|timeout|délai|delai|tempor|network|fetch|injoignable|failed|502|503|504|500/.test(msg);
 }
 
 // Point d'entrée unique : route vers Anthropic ou un endpoint compatible OpenAI.
-async function callLLM(userMessage, systemPrompt) {
-  if (LLM_PROVIDER === 'openai') return callOpenAICompatible(userMessage, systemPrompt);
-  return callAnthropic(userMessage, systemPrompt);
+// Cette fonction réessaie les erreurs temporaires puis ne signale qu'une seule
+// erreur finale, au lieu de bloquer durablement le pipeline à la première tentative.
+async function callLLM(userMessage, systemPrompt, options = {}) {
+  const maxRetries = Number.isInteger(options.retries) ? options.retries : LLM_MAX_RETRIES;
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const content = LLM_PROVIDER === 'openai'
+        ? await callOpenAICompatible(userMessage, systemPrompt)
+        : await callAnthropic(userMessage, systemPrompt);
+
+      markLLMSuccess();
+      if (attempt > 0) {
+        setAnalysisDebug('llm_recovered_after_retry', { attempt: attempt + 1 });
+      }
+      return content;
+    } catch (err) {
+      lastError = err;
+      const retryable = isRetryableLLMError(err);
+      setAnalysisDebug('llm_attempt_failed', {
+        attempt: attempt + 1,
+        maxAttempts: maxRetries + 1,
+        retryable,
+        message: err?.message || String(err),
+      });
+
+      if (attempt < maxRetries && retryable) {
+        const delay = LLM_RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+      break;
+    }
+  }
+
+  llmFailureCount++;
+  reportLLMError(lastError?.message || 'LLM : erreur inconnue.');
+  return '';
 }
 
 async function callAnthropic(userMessage, systemPrompt) {
@@ -491,54 +627,76 @@ async function callAnthropic(userMessage, systemPrompt) {
       },
       body: JSON.stringify({
         model: LLM_MODEL || DEFAULT_ANTHROPIC_MODEL,
-        max_tokens: 768,
+        max_tokens: LLM_ANALYSIS_MAX_TOKENS,
         temperature: 0,
         system: systemPrompt,
         messages: [{ role: 'user', content: userMessage }],
       }),
     });
-    let data = {};
-    try { data = await res.json(); }
-    catch (jsonErr) {
-      reportLLMError('Anthropic : réponse non JSON (HTTP ' + res.status + ').');
-      return '';
+
+    const rawText = await res.text();
+    const data = parseJsonMaybe(rawText);
+
+    setAnalysisDebug('llm_http_response', {
+      provider: 'anthropic',
+      status: res.status,
+      ok: res.ok,
+      rawPreview: previewLLMResponse(rawText, 500),
+      topLevelKeys: data && typeof data === 'object' ? Object.keys(data).slice(0, 12) : [],
+    });
+
+    if (!data) {
+      throw new Error(
+        'Anthropic : réponse non JSON (HTTP ' + res.status + '). Aperçu brut : ' +
+        previewLLMResponse(rawText, 320)
+      );
     }
 
     if (!res.ok || data.error) {
-      const apiMessage = data.error?.message || data.error || ('HTTP ' + res.status);
-      reportLLMError('Anthropic : ' + apiMessage);
-      return '';
+      const apiMessage = extractAPIErrorMessage(data) || ('HTTP ' + res.status);
+      throw new Error(
+        'Anthropic : HTTP ' + res.status + ' — ' + apiMessage +
+        '. Aperçu brut : ' + previewLLMResponse(rawText, 320)
+      );
     }
 
-    const content = stripFences(data.content?.[0]?.text?.trim() || '');
+    const extracted = extractAnthropicContent(data);
+    const content = stripFences(extracted.content || '');
+
     if (!content) {
-      reportLLMError('Anthropic : réponse vide du modèle.');
-      return '';
+      throw new Error(
+        'Anthropic : réponse reçue mais contenu texte introuvable. ' +
+        'Format détecté : ' + describeLLMShape(data) +
+        '. Aperçu brut : ' + previewLLMResponse(rawText, 420)
+      );
     }
 
-    markLLMSuccess();
+    setAnalysisDebug('llm_content_extracted', {
+      provider: 'anthropic',
+      path: extracted.path,
+      contentPreview: previewLLMResponse(content, 260),
+    });
+
     return content;
   } catch (err) {
-    reportLLMError('Anthropic : ' + err.message);
-    return '';
+    throw new Error(err?.message || 'Anthropic : erreur inconnue.');
   }
 }
 
 // Compatible OpenAI : OpenAI, LM Studio (ex. http://localhost:1234/v1), ou tout
 // fournisseur exposant l'endpoint /chat/completions.
 async function callOpenAICompatible(userMessage, systemPrompt) {
-  try {
-    const base = LLM_ENDPOINT.replace(/\/+$/, '');   // on enlève un éventuel "/" final
-    const url  = base + '/chat/completions';
-    const headers = { 'Content-Type': 'application/json' };
-    if (LLM_API_KEY) headers['Authorization'] = 'Bearer ' + LLM_API_KEY; // facultatif pour LM Studio local
+  const url = buildOpenAIChatCompletionsUrl(LLM_ENDPOINT);
+  const headers = { 'Content-Type': 'application/json' };
+  if (LLM_API_KEY) headers['Authorization'] = 'Bearer ' + LLM_API_KEY; // facultatif pour LM Studio local
 
+  try {
     const res = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         model: LLM_MODEL,
-        max_tokens: 768,
+        max_tokens: LLM_ANALYSIS_MAX_TOKENS,
         temperature: 0,
         messages: [
           { role: 'system', content: systemPrompt },
@@ -546,32 +704,56 @@ async function callOpenAICompatible(userMessage, systemPrompt) {
         ],
       }),
     });
-    let data = {};
-    try { data = await res.json(); }
-    catch (jsonErr) {
-      reportLLMError('Endpoint LLM : réponse non JSON (HTTP ' + res.status + ').');
-      return '';
+
+    const rawText = await res.text();
+    const data = parseJsonMaybe(rawText);
+
+    setAnalysisDebug('llm_http_response', {
+      provider: 'openai-compatible',
+      status: res.status,
+      ok: res.ok,
+      url: redactUrlForDebug(url),
+      rawPreview: previewLLMResponse(rawText, 500),
+      topLevelKeys: data && typeof data === 'object' ? Object.keys(data).slice(0, 12) : [],
+    });
+
+    if (!data) {
+      throw new Error(
+        'Endpoint LLM : réponse non JSON (HTTP ' + res.status + '). Aperçu brut : ' +
+        previewLLMResponse(rawText, 320)
+      );
     }
 
     if (!res.ok || data.error) {
-      const apiMessage = typeof data.error === 'string'
-        ? data.error
-        : (data.error?.message || ('HTTP ' + res.status));
-      reportLLMError('Endpoint LLM : ' + apiMessage);
-      return '';
+      const apiMessage = extractAPIErrorMessage(data) || ('HTTP ' + res.status);
+      throw new Error(
+        'Endpoint LLM : HTTP ' + res.status + ' — ' + apiMessage +
+        '. Aperçu brut : ' + previewLLMResponse(rawText, 320)
+      );
     }
 
-    const content = stripFences(data.choices?.[0]?.message?.content?.trim() || '');
+    const extracted = extractOpenAICompatibleContent(data);
+    const content = stripFences(extracted.content || '');
+
     if (!content) {
-      reportLLMError('Endpoint LLM : réponse vide du modèle.');
-      return '';
+      throw new Error(
+        'Endpoint LLM : réponse reçue mais contenu texte introuvable. ' +
+        'Chemin testé : choices[0].message.content, choices[0].text, output_text, output, message.content, content. ' +
+        'Format détecté : ' + describeLLMShape(data) +
+        '. Aperçu brut : ' + previewLLMResponse(rawText, 420)
+      );
     }
 
-    markLLMSuccess();
+    setAnalysisDebug('llm_content_extracted', {
+      provider: 'openai-compatible',
+      path: extracted.path,
+      contentPreview: previewLLMResponse(content, 260),
+    });
+
     return content;
   } catch (err) {
-    reportLLMError('Endpoint LLM injoignable : ' + err.message);
-    return '';
+    const msg = err?.message || 'Endpoint LLM : erreur inconnue.';
+    throw new Error(msg.startsWith('Endpoint LLM') ? msg : 'Endpoint LLM injoignable : ' + msg);
   }
 }
 
@@ -579,6 +761,140 @@ function previewLLMResponse(str, limit = 260) {
   const clean = String(str || '').replace(/\s+/g, ' ').trim();
   if (!clean) return '';
   return clean.length > limit ? clean.slice(0, limit) + '…' : clean;
+}
+
+function parseJsonMaybe(rawText) {
+  if (typeof rawText !== 'string' || !rawText.trim()) return null;
+  try { return JSON.parse(rawText); }
+  catch (_) { return null; }
+}
+
+function buildOpenAIChatCompletionsUrl(endpoint) {
+  const base = String(endpoint || '').trim().replace(/\/+$/, '');
+  if (!base) return '/chat/completions';
+  // Permet de coller soit https://fournisseur/api/v1, soit l'URL complète
+  // https://fournisseur/api/v1/chat/completions sans créer /chat/completions/chat/completions.
+  if (/\/chat\/completions$/i.test(base)) return base;
+  return base + '/chat/completions';
+}
+
+function redactUrlForDebug(url) {
+  try {
+    const u = new URL(url);
+    // On garde le domaine et le chemin : pas de clé API dans l'URL normalement.
+    return u.origin + u.pathname;
+  } catch (_) {
+    return String(url || '').split('?')[0];
+  }
+}
+
+function extractAPIErrorMessage(data) {
+  if (!data || typeof data !== 'object') return '';
+  const err = data.error || data.errors;
+  if (!err) return '';
+  if (typeof err === 'string') return err;
+  if (Array.isArray(err)) {
+    return err.map(e => e?.message || e?.detail || e?.code || JSON.stringify(e)).join(' | ');
+  }
+  return err.message || err.detail || err.code || err.type || JSON.stringify(err).slice(0, 300);
+}
+
+function coerceContentToText(value) {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value.map(part => {
+      if (typeof part === 'string') return part;
+      if (!part || typeof part !== 'object') return '';
+      return part.text || part.content || part.value || '';
+    }).filter(Boolean).join('\n');
+  }
+  if (value && typeof value === 'object') {
+    return value.text || value.content || value.value || '';
+  }
+  return '';
+}
+
+function extractOpenAICompatibleContent(data) {
+  const choices = data?.choices;
+  if (Array.isArray(choices) && choices.length) {
+    const first = choices[0] || {};
+    const msgContent = coerceContentToText(first.message?.content);
+    if (msgContent) return { content: msgContent, path: 'choices[0].message.content' };
+
+    const text = coerceContentToText(first.text);
+    if (text) return { content: text, path: 'choices[0].text' };
+
+    const delta = coerceContentToText(first.delta?.content);
+    if (delta) return { content: delta, path: 'choices[0].delta.content' };
+  }
+
+  const outputText = coerceContentToText(data?.output_text);
+  if (outputText) return { content: outputText, path: 'output_text' };
+
+  const output = data?.output;
+  if (Array.isArray(output)) {
+    const parts = [];
+    for (const item of output) {
+      if (typeof item === 'string') parts.push(item);
+      else if (item?.content) parts.push(coerceContentToText(item.content));
+      else if (item?.text) parts.push(coerceContentToText(item.text));
+    }
+    const joined = parts.filter(Boolean).join('\n');
+    if (joined) return { content: joined, path: 'output[]' };
+  }
+
+  const messageContent = coerceContentToText(data?.message?.content);
+  if (messageContent) return { content: messageContent, path: 'message.content' };
+
+  const content = coerceContentToText(data?.content);
+  if (content) return { content, path: 'content' };
+
+  const nested = data?.data && typeof data.data === 'object'
+    ? extractOpenAICompatibleContent(data.data)
+    : { content: '', path: '' };
+  if (nested.content) return { content: nested.content, path: 'data.' + nested.path };
+
+  return { content: '', path: 'not-found' };
+}
+
+function extractAnthropicContent(data) {
+  const content = data?.content;
+  if (Array.isArray(content)) {
+    const text = content.map(part => {
+      if (typeof part === 'string') return part;
+      if (!part || typeof part !== 'object') return '';
+      if (part.type === 'text' && part.text) return part.text;
+      return part.text || part.content || '';
+    }).filter(Boolean).join('\n');
+    if (text) return { content: text, path: 'content[].text' };
+  }
+
+  const direct = coerceContentToText(content);
+  if (direct) return { content: direct, path: 'content' };
+
+  const text = coerceContentToText(data?.text);
+  if (text) return { content: text, path: 'text' };
+
+  return { content: '', path: 'not-found' };
+}
+
+function describeLLMShape(data) {
+  if (!data || typeof data !== 'object') return typeof data;
+  const keys = Object.keys(data).slice(0, 12);
+  const choice0 = Array.isArray(data.choices) ? data.choices[0] : null;
+  const choiceKeys = choice0 && typeof choice0 === 'object' ? Object.keys(choice0).slice(0, 8) : [];
+  const messageKeys = choice0?.message && typeof choice0.message === 'object'
+    ? Object.keys(choice0.message).slice(0, 8)
+    : [];
+  return JSON.stringify({
+    keys,
+    choicesLength: Array.isArray(data.choices) ? data.choices.length : null,
+    choice0Keys: choiceKeys,
+    messageKeys,
+    hasOutputText: typeof data.output_text === 'string',
+    hasOutput: Array.isArray(data.output),
+    hasContent: Boolean(data.content),
+  });
 }
 
 function normalizeParsedLLMValue(value) {
@@ -595,8 +911,241 @@ function normalizeParsedLLMValue(value) {
     const found = possibleArrays.find(Array.isArray);
     if (found) return found;
     if (value.claim && value.verdict) return [value];
+    if (value.statement || value.assertion || value.text || value.content) return [value];
   }
   return null;
+}
+
+function normalizeVerdictLabel(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const upper = raw.toUpperCase().replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (upper === 'TRUE' || upper === 'CORRECT' || upper === 'VRAI') return 'TRUE';
+  if (upper === 'SUBSTANTIALLY TRUE' || upper === 'MOSTLY TRUE' || upper === 'PLUTOT VRAI' || upper === 'PLUTÔT VRAI') return 'SUBSTANTIALLY TRUE';
+  if (upper === 'FALSE' || upper === 'INCORRECT' || upper === 'FAUX') return 'FALSE';
+  if (upper === 'MISLEADING' || upper === 'TROMPEUR' || upper === 'PARTLY FALSE' || upper === 'PARTIALLY FALSE') return 'MISLEADING';
+  if (upper === 'UNVERIFIABLE' || upper === 'UNKNOWN' || upper === 'INSUFFICIENT EVIDENCE' || upper === 'NON VERIFIABLE' || upper === 'NON VÉRIFIABLE') return 'UNVERIFIABLE';
+  return upper;
+}
+
+function normalizeVerdictItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  const claim = item.claim
+    || item.claim_en
+    || item.claim_fr
+    || item.statement
+    || item.assertion
+    || item.text
+    || item.fact
+    || item.content
+    || '';
+  const verdict = normalizeVerdictLabel(item.verdict || item.label || item.status || item.result || item.assessment || item.truth_value || '');
+
+  if (!String(claim || '').trim()) return { ...item, claim: '', verdict };
+
+  const normalized = {
+    ...item,
+    claim: String(claim).trim(),
+    verdict,
+  };
+
+  if (!normalized.speaker && item.speaker_name) normalized.speaker = item.speaker_name;
+  if (!normalized.explanation && item.reason) normalized.explanation = item.reason;
+  if (!normalized.explanation && item.rationale) normalized.explanation = item.rationale;
+  if (!normalized.explanation && item.justification) normalized.explanation = item.justification;
+
+  if (typeof normalized.confidence !== 'number') {
+    const numeric = Number(item.confidence ?? item.score ?? item.probability);
+    if (Number.isFinite(numeric)) normalized.confidence = numeric > 1 ? numeric / 100 : numeric;
+  }
+
+  return normalized;
+}
+
+function normalizeVerdictResults(results) {
+  return Array.isArray(results) ? results.map(normalizeVerdictItem).filter(Boolean) : [];
+}
+
+function escapeRawControlsInsideJsonStrings(input) {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+
+  for (const ch of String(input || '')) {
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+
+    if (ch === '\\') {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      out += ch;
+      continue;
+    }
+
+    if (inString && (ch === '\n' || ch === '\r' || ch === '\t')) {
+      out += ' ';
+      continue;
+    }
+
+    out += ch;
+  }
+
+  return out;
+}
+
+function sanitizeLLMJsonCandidate(candidate) {
+  return stripFences(String(candidate || ''))
+    .replace(/^\uFEFF/, '')
+    .replace(/^[\s\n\r]*json\s*/i, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/,\s*([}\]])/g, '$1')
+    .trim();
+}
+
+function tryParseNormalizedLLMValue(candidate) {
+  const first = sanitizeLLMJsonCandidate(candidate);
+  const variants = [
+    first,
+    escapeRawControlsInsideJsonStrings(first),
+    first.replace(/,\s*([}\]])/g, '$1'),
+    escapeRawControlsInsideJsonStrings(first).replace(/,\s*([}\]])/g, '$1'),
+  ];
+
+  let lastError = null;
+  for (const variant of [...new Set(variants)]) {
+    if (!variant) continue;
+    try {
+      const parsed = JSON.parse(variant);
+      const normalized = normalizeParsedLLMValue(parsed);
+      if (normalized) return { ok: true, results: normalized, repairedText: variant };
+      return { ok: false, error: 'JSON valide mais non normalisable.', repairedText: variant };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  return { ok: false, error: lastError?.message || 'JSON.parse failed', repairedText: first };
+}
+
+function extractBalancedJsonCandidates(text, opening, closing) {
+  const s = String(text || '');
+  const candidates = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (ch === opening) {
+      if (depth === 0) start = i;
+      depth++;
+      continue;
+    }
+
+    if (ch === closing && depth > 0) {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        candidates.push(s.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function extractJsonRange(text, opening, closing) {
+  const candidates = extractBalancedJsonCandidates(text, opening, closing);
+  return candidates.length ? candidates[0] : '';
+}
+
+function decodeJsonStringLiteral(value) {
+  try {
+    return JSON.parse('"' + String(value || '').replace(/"/g, '\\"') + '"');
+  } catch (_) {
+    return String(value || '').replace(/\\"/g, '"').replace(/\\n/g, ' ').replace(/\\r/g, ' ');
+  }
+}
+
+function extractQuotedFieldFromLooseObject(objectText, key) {
+  const re = new RegExp('"' + key + '"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"', 'i');
+  const match = String(objectText || '').match(re);
+  return match ? decodeJsonStringLiteral(match[1]) : '';
+}
+
+function looseExtractVerdictObjects(text) {
+  const cleaned = sanitizeLLMJsonCandidate(text);
+  const objectCandidates = extractBalancedJsonCandidates(cleaned, '{', '}');
+  const items = [];
+
+  for (const candidate of objectCandidates) {
+    const parsed = tryParseNormalizedLLMValue(candidate);
+    if (parsed.ok && parsed.results?.length) {
+      items.push(...parsed.results);
+      continue;
+    }
+
+    // Fallback de récupération champ par champ : utile quand l'enveloppe globale
+    // est cassée mais que les objets individuels sont presque lisibles.
+    const item = {
+      claim: extractQuotedFieldFromLooseObject(candidate, 'claim'),
+      claim_fr: extractQuotedFieldFromLooseObject(candidate, 'claim_fr'),
+      claim_en: extractQuotedFieldFromLooseObject(candidate, 'claim_en'),
+      verdict: extractQuotedFieldFromLooseObject(candidate, 'verdict'),
+      speaker: extractQuotedFieldFromLooseObject(candidate, 'speaker'),
+      explanation: extractQuotedFieldFromLooseObject(candidate, 'explanation'),
+    };
+    const confidence = extractQuotedFieldFromLooseObject(candidate, 'confidence');
+    if (confidence) item.confidence = Number(confidence);
+
+    if (item.claim || item.claim_fr || item.claim_en || item.verdict) {
+      items.push(item);
+    }
+  }
+
+  // Dernier recours pour une réponse tronquée au milieu d'un seul objet :
+  // on récupère les champs déjà présents si claim + verdict existent.
+  if (!items.length && /"claim"\s*:/.test(cleaned) && /"verdict"\s*:/.test(cleaned)) {
+    const item = {
+      claim: extractQuotedFieldFromLooseObject(cleaned, 'claim'),
+      claim_fr: extractQuotedFieldFromLooseObject(cleaned, 'claim_fr'),
+      claim_en: extractQuotedFieldFromLooseObject(cleaned, 'claim_en'),
+      verdict: extractQuotedFieldFromLooseObject(cleaned, 'verdict'),
+      speaker: extractQuotedFieldFromLooseObject(cleaned, 'speaker') || 'Unknown',
+      explanation: extractQuotedFieldFromLooseObject(cleaned, 'explanation') || 'Explication non récupérée : réponse JSON partiellement tronquée.',
+    };
+    if (item.claim && item.verdict) items.push(item);
+  }
+
+  return normalizeVerdictResults(items);
 }
 
 function parseArrayWithDiagnostics(str) {
@@ -611,67 +1160,106 @@ function parseArrayWithDiagnostics(str) {
     };
   }
 
-  const cleaned = stripFences(raw).trim();
+  const cleaned = sanitizeLLMJsonCandidate(raw);
   const rawPreview = previewLLMResponse(cleaned);
 
-  try {
-    const direct = JSON.parse(cleaned);
-    const normalized = normalizeParsedLLMValue(direct);
-    if (normalized) {
-      return { ok: true, results: normalized, reason: 'json', rawPreview };
-    }
-    return {
-      ok: false,
-      results: [],
-      reason: 'json-not-array',
-      message: 'LLM : JSON reçu, mais il ne contient pas de tableau de verdicts exploitable.',
-      rawPreview,
-    };
-  } catch (_) {
-    // Beaucoup de fournisseurs ajoutent parfois une phrase avant/après le JSON.
-    // On tente donc d'extraire le premier tableau JSON présent dans la réponse.
+  // 1) JSON direct, avec petites réparations classiques.
+  const direct = tryParseNormalizedLLMValue(cleaned);
+  if (direct.ok) {
+    return { ok: true, results: direct.results, reason: 'json-or-repaired-json', rawPreview };
   }
 
-  const start = cleaned.indexOf('[');
-  const end   = cleaned.lastIndexOf(']');
-  if (start === -1 || end === -1 || end <= start) {
+  // 2) Extraction d'un tableau équilibré au milieu d'un texte.
+  const arrayCandidate = extractJsonRange(cleaned, '[', ']');
+  if (arrayCandidate) {
+    const parsedArray = tryParseNormalizedLLMValue(arrayCandidate);
+    if (parsedArray.ok) {
+      return { ok: true, results: parsedArray.results, reason: 'extracted-balanced-array', rawPreview };
+    }
+  }
+
+  // 3) Extraction d'un objet équilibré au milieu d'un texte.
+  const objectCandidate = extractJsonRange(cleaned, '{', '}');
+  if (objectCandidate) {
+    const parsedObject = tryParseNormalizedLLMValue(objectCandidate);
+    if (parsedObject.ok) {
+      return { ok: true, results: parsedObject.results, reason: 'extracted-balanced-object', rawPreview };
+    }
+  }
+
+  // 4) Récupération objet par objet, même si l'enveloppe globale est cassée.
+  const looseResults = looseExtractVerdictObjects(cleaned);
+  if (looseResults.length) {
     return {
-      ok: false,
-      results: [],
-      reason: 'no-array',
-      message: 'LLM : réponse non conforme. Un tableau JSON était attendu, mais aucun tableau JSON n’a été trouvé.',
+      ok: true,
+      results: looseResults,
+      reason: 'loose-object-recovery',
       rawPreview,
     };
   }
 
-  const candidate = cleaned.slice(start, end + 1);
-  try {
-    const parsed = JSON.parse(candidate);
-    const normalized = normalizeParsedLLMValue(parsed);
-    if (normalized) {
-      return { ok: true, results: normalized, reason: 'extracted-array', rawPreview };
-    }
-    return {
-      ok: false,
-      results: [],
-      reason: 'extracted-not-array',
-      message: 'LLM : tableau JSON extrait, mais contenu inexploitable.',
-      rawPreview,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      results: [],
-      reason: 'invalid-json',
-      message: 'LLM : JSON invalide reçu. Le modèle répond, mais pas dans le format attendu.',
-      rawPreview,
-      parseError: err.message,
-    };
-  }
+  const looksTruncatedArray = cleaned.includes('[') && cleaned.indexOf('[') > -1 && cleaned.lastIndexOf(']') < cleaned.indexOf('[');
+  const looksTruncatedObject = cleaned.includes('{') && cleaned.indexOf('{') > -1 && cleaned.lastIndexOf('}') < cleaned.indexOf('{');
+  const truncated = looksTruncatedArray || looksTruncatedObject || /finish_reason"\s*:\s*"length"/i.test(cleaned);
+
+  return {
+    ok: false,
+    results: [],
+    reason: truncated ? 'truncated-json' : 'invalid-json',
+    message: truncated
+      ? 'LLM : réponse JSON tronquée. La fenêtre a été découpée, mais le modèle a encore coupé sa sortie.'
+      : 'LLM : JSON invalide reçu. Le modèle répond, mais pas dans le format attendu.',
+    rawPreview,
+    parseError: direct.error,
+  };
 }
 
 function parseArray(str) {
   return parseArrayWithDiagnostics(str).results;
+}
+
+function splitTranscriptForLLM(text, maxChars = LLM_BATCH_CHAR_LIMIT) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return [];
+  if (normalized.length <= maxChars) return [normalized];
+
+  // On essaie d'abord de découper sur les labels [Speaker X] / [Nom].
+  const speakerParts = normalized
+    .split(/(?=\[[^\]]{1,60}\]\s+)/g)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const parts = speakerParts.length > 1 ? speakerParts : normalized.split(/[.!?…]+\s+/g);
+  const batches = [];
+  let current = '';
+
+  for (const part of parts) {
+    if (!part) continue;
+    if ((current + ' ' + part).trim().length <= maxChars) {
+      current = (current + ' ' + part).trim();
+      continue;
+    }
+    if (current) batches.push(current);
+
+    if (part.length <= maxChars) {
+      current = part;
+    } else {
+      // Dernier recours : découpe par mots pour éviter une requête trop longue.
+      const words = part.split(/\s+/);
+      current = '';
+      for (const word of words) {
+        if ((current + ' ' + word).trim().length > maxChars) {
+          if (current) batches.push(current);
+          current = word;
+        } else {
+          current = (current + ' ' + word).trim();
+        }
+      }
+    }
+  }
+
+  if (current) batches.push(current);
+  return batches.slice(0, LLM_MAX_BATCHES_PER_WINDOW);
 }
 
 // ── Lexical features ──────────────────────────────────────────────────────────
@@ -822,7 +1410,10 @@ function isDuplicate(claim) {
 
 // ── Rolling window ────────────────────────────────────────────────────────────
 
-const WINDOW_SIZE = 4;
+// Fenêtre d'analyse plus courte pour la version de test : l'analyse démarre
+// après 2 phrases finales au lieu de 4, afin de confirmer rapidement que
+// evaluateClaims() est bien appelée. Remettre 4 en production si coût API trop élevé.
+const WINDOW_SIZE = 2;
 const WINDOW_KEEP = 15;
 
 let sentenceWindow  = [];
@@ -848,6 +1439,13 @@ function resetWindow() {
 }
 
 async function onNewSentence(text, speakerId) {
+  setAnalysisDebug('final_transcript_received', {
+    textPreview: previewLLMResponse(text, 120),
+    speakerId: speakerId ?? null,
+    sentenceCountBeforePush: sentenceCount,
+    windowLengthBeforePush: sentenceWindow.length,
+  });
+
   if (lastSpeakerId !== null &&
       speakerId !== null &&
       speakerId !== undefined &&
@@ -868,6 +1466,11 @@ async function onNewSentence(text, speakerId) {
     const flushLexSummary  = buildLexicalSummary(flushLexSnapshot);
     windowLexical   = { rates: { hedging: 0, certainty: 0, filler: 0, emotional: 0, exclusive: 0, firstPersonSg: 0 }, wordsPerSecond: null, wordCount: 0 };
     windowStartTime = null;
+    setAnalysisDebug('evaluate_triggered_speaker_change', {
+      sentenceCount,
+      windowLength: sentenceWindow.length,
+      textPreview: previewLLMResponse(flushText, 180),
+    });
     await evaluateClaims(flushText, pageTitle, flushLexSummary, flushLexSnapshot, flushDominantSpeaker, flushDominantId);
   }
   lastSpeakerId = speakerId;
@@ -879,6 +1482,16 @@ async function onNewSentence(text, speakerId) {
   sentenceWindow.push({ text: labeledText, speakerId, speakerName: confirmedName });
   if (sentenceWindow.length > WINDOW_KEEP) sentenceWindow.shift();
   sentenceCount++;
+
+  setAnalysisDebug('sentence_window_updated', {
+    sentenceCount,
+    windowSize: WINDOW_SIZE,
+    windowLength: sentenceWindow.length,
+    nextTriggerIn: WINDOW_SIZE - (sentenceCount % WINDOW_SIZE || WINDOW_SIZE),
+    lastSentencePreview: previewLLMResponse(labeledText, 160),
+    speakerId: speakerId ?? null,
+    speakerName: confirmedName || null,
+  });
 
   if (!windowStartTime) windowStartTime = Date.now();
 
@@ -920,6 +1533,12 @@ async function onNewSentence(text, speakerId) {
     windowStartTime = null;
 
     try {
+      setAnalysisDebug('evaluate_triggered_window', {
+        sentenceCount,
+        windowSize: WINDOW_SIZE,
+        windowLength: sentenceWindow.length,
+        textPreview: previewLLMResponse(contextText, 180),
+      });
       await evaluateClaims(contextText, pageTitle, lexicalSummary, lexicalSnapshot, dominantSpeaker, dominantSpeakerId);
     } catch (e) {
       console.error('[pipeline] evaluateClaims failed:', e);
@@ -931,6 +1550,14 @@ async function onNewSentence(text, speakerId) {
 // ── Evaluation pipeline ───────────────────────────────────────────────────────
 
 async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapshot, dominantSpeaker, dominantSpeakerId) {
+  analysisAttemptCount++;
+  setAnalysisDebug('evaluate_started', {
+    analysisAttemptCount,
+    contextChars: String(contextText || '').length,
+    contextPreview: previewLLMResponse(contextText, 220),
+    titlePreview: previewLLMResponse(title, 120),
+  });
+
   try {
     const dateContext    = pageDate ? `\nDate: ${pageDate}` : '';
 
@@ -960,25 +1587,73 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       ? `\n\nClaims already fact-checked this session — do NOT re-evaluate these or close variants:\n- ${checkedList}\n`
       : '';
 
-    const raw = await callLLM(
-      `${titleContext}Transcript: "${contextText}"${alreadyChecked}${lexicalContext}`,
-      EVALUATE_PROMPT
-    );
+    const batches = splitTranscriptForLLM(contextText);
+    setAnalysisDebug('llm_batches_prepared', {
+      batchCount: batches.length,
+      maxChars: LLM_BATCH_CHAR_LIMIT,
+      maxClaimsPerBatch: LLM_MAX_CLAIMS_PER_BATCH,
+      previews: batches.map(b => previewLLMResponse(b, 120)),
+    });
 
-    const parsed = parseArrayWithDiagnostics(raw);
-    if (!parsed.ok) {
-      console.warn('[pipeline] LLM response rejected:', parsed.reason, parsed.rawPreview || parsed.parseError || '');
+    const aggregated = [];
+    const parseFailures = [];
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batchText = batches[batchIndex];
+
+      const raw = await callLLM(
+        `${titleContext}Transcript chunk ${batchIndex + 1}/${batches.length}: "${batchText}"${alreadyChecked}${lexicalContext}`,
+        EVALUATE_PROMPT
+      );
+
+      setAnalysisDebug('llm_fast_response_received', {
+        batchIndex: batchIndex + 1,
+        batchCount: batches.length,
+        hasRaw: Boolean(raw),
+        rawPreview: previewLLMResponse(raw, 320),
+      });
+
+      const parsed = parseArrayWithDiagnostics(raw);
+      if (!parsed.ok) {
+        parseFailures.push(parsed);
+        setAnalysisDebug('llm_parse_failed', {
+          batchIndex: batchIndex + 1,
+          reason: parsed.reason || null,
+          message: parsed.message || null,
+          rawPreview: parsed.rawPreview || parsed.parseError || '',
+        });
+        console.warn('[pipeline] LLM response rejected:', parsed.reason, parsed.rawPreview || parsed.parseError || '');
+        continue;
+      }
+
+      const batchResults = normalizeVerdictResults(parsed.results);
+      aggregated.push(...batchResults);
+
+      setAnalysisDebug('llm_json_parsed', {
+        batchIndex: batchIndex + 1,
+        parseReason: parsed.reason,
+        resultCount: batchResults.length,
+        firstResultPreview: batchResults[0] ? previewLLMResponse(JSON.stringify(batchResults[0]), 220) : '',
+      });
+    }
+
+    const results = normalizeVerdictResults(aggregated);
+
+    if (!results.length && parseFailures.length) {
+      const first = parseFailures[0];
       notifyPipelineError(
-        parsed.message + (parsed.rawPreview ? ' Aperçu : ' + parsed.rawPreview : ''),
+        first.message + (first.rawPreview ? ' Aperçu : ' + first.rawPreview : ''),
         'llm',
-        { fatal: true }
+        { fatal: false }
       );
       return;
     }
 
-    const results = parsed.results;
     if (!results.length) {
-      console.info('[pipeline] LLM returned an empty JSON array: no factual claim in this window.');
+      setAnalysisDebug('llm_no_claims_detected', {
+        contextPreview: previewLLMResponse(contextText, 180),
+      });
+      console.info('[pipeline] LLM returned no factual claim in this window.');
       return;
     }
 
@@ -989,6 +1664,11 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       const message = invalidShapeCount
         ? 'LLM : réponse reçue, mais aucun verdict exploitable. Les champs claim/verdict sont absents ou mal nommés.'
         : 'LLM : uniquement des affirmations déjà analysées, aucun nouveau verdict à afficher.';
+      setAnalysisDebug('llm_no_usable_verdicts', {
+        invalidShapeCount,
+        resultCount: results.length,
+        sample: results[0] ? previewLLMResponse(JSON.stringify(results[0]), 220) : '',
+      });
       console.warn('[pipeline] no usable verdict after filtering:', { invalidShapeCount, results });
       notifyPipelineError(message, 'llm', { fatal: invalidShapeCount > 0 });
       return;
@@ -1007,6 +1687,7 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
         })),
       }).catch(() => {});
       console.log('[pipeline] fast verdicts sent:', valid.length, '| speaker:', dominantSpeaker);
+      setAnalysisDebug('fast_verdicts_sent', { count: valid.length, claims: valid.map(r => r.claim).slice(0, 3) });
     }
 
     groundAndUpdate(contextText, valid, title, lexicalSummary, lexicalSnapshot, dominantSpeaker, dominantSpeakerId);
@@ -1063,7 +1744,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
           return { ...fastResult, sources: urls, pending: false, lexical: lexicalSnapshot, speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
         }
 
-        const results = parsed.results;
+        const results = normalizeVerdictResults(parsed.results);
         const match = results.find(r => r && r.claim && r.verdict);
         if (!match) {
           console.warn('[grounded] no usable grounded verdict:', results);
@@ -1107,6 +1788,15 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
 // (logique de suivi du locuteur reprise de l'ancien handler TRANSCRIPT_RESULT)
 
 function onTranscriptionResult(text, isFinal, isInterim, speaker) {
+  setAnalysisDebug('transcript_dispatched_to_overlay', {
+    isFinal: Boolean(isFinal),
+    isInterim: Boolean(isInterim),
+    speaker: speaker ?? null,
+    textPreview: previewLLMResponse(text, 140),
+    sentenceWindowSize: sentenceWindow.length,
+    sentenceCount,
+  });
+
   if (activeTabId) {
     browserAPI.tabs.sendMessage(activeTabId, {
       type: 'TRANSCRIPT_RESULT',
@@ -1162,6 +1852,11 @@ function connectDeepgram() {
 
     deepgramSocket.onopen = () => {
       console.log('[background] deepgram connecté');
+      setAnalysisDebug('deepgram_connected', {
+        model: 'nova-3',
+        language: 'multi',
+        endpointing: '100',
+      });
       resolve();
     };
 
@@ -1170,6 +1865,11 @@ function connectDeepgram() {
         const data = JSON.parse(event.data);
 
         if (data.type === 'UtteranceEnd') {
+          setDeepgramSignalDebug('deepgram_utterance_end', {
+            utteranceBufferChars: utteranceBuffer.length,
+            sentenceWindowSize: sentenceWindow.length,
+            sentenceCount,
+          });
           if (activeTabId) {
             browserAPI.tabs.sendMessage(activeTabId, { type: 'UTTERANCE_END' }).catch(() => {});
           }
@@ -1177,14 +1877,52 @@ function connectDeepgram() {
         }
 
         const result = data.channel?.alternatives?.[0];
-        if (!result || !result.transcript) return;
+
+        if (!result || !result.transcript) {
+          setDeepgramSignalDebug('deepgram_event_no_transcript', {
+            eventType: data.type || 'unknown',
+            is_final: Boolean(data.is_final),
+            speech_final: Boolean(data.speech_final),
+            sentenceWindowSize: sentenceWindow.length,
+            sentenceCount,
+          });
+          return;
+        }
 
         const text    = result.transcript.trim();
-        const isFinal = data.is_final;
-        const speech  = data.speech_final;
+        const isFinal = Boolean(data.is_final);
+        const speech  = Boolean(data.speech_final);
         const speaker = result.words?.[0]?.speaker ?? null;
 
-        if (!text) return;
+        if (!text) {
+          setDeepgramSignalDebug('deepgram_empty_transcript', {
+            is_final: isFinal,
+            speech_final: speech,
+            sentenceWindowSize: sentenceWindow.length,
+            sentenceCount,
+          });
+          return;
+        }
+
+        setDeepgramSignalDebug(
+          isFinal && speech ? 'deepgram_final_speech_signal'
+            : isFinal ? 'deepgram_final_buffer_signal'
+            : 'deepgram_interim',
+          {
+            is_final: isFinal,
+            speech_final: speech,
+            speaker,
+            textPreview: previewLLMResponse(text, 160),
+            utteranceBufferChars: utteranceBuffer.length,
+            sentenceWindowSize: sentenceWindow.length,
+            sentenceCount,
+            route: isFinal && speech
+              ? 'onTranscriptionResult(final=true) → onNewSentence'
+              : isFinal
+                ? 'buffer only, waiting for speech_final'
+                : 'interim only',
+          }
+        );
 
         if (isFinal && speech) {
           const fullText = utteranceBuffer ? utteranceBuffer + ' ' + text : text;
@@ -1249,6 +1987,10 @@ browserAPI.runtime.onStartup.addListener(() => {
   pipelineHealthy = true;
   llmHealthy = true;
   lastPipelineError = null;
+  lastLLMWarning = null;
+  lastAnalysisDebug = null;
+  analysisAttemptCount = 0;
+  llmFailureCount = 0;
 });
 
 browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -1352,6 +2094,9 @@ async function startFactCheck() {
   activeTabId = tab.id;
 
   clearPipelineError('new-session');
+  lastAnalysisDebug = null;
+  analysisAttemptCount = 0;
+  llmFailureCount = 0;
   resetWindow();
   recentClaims.clear();
   isCapturing  = true;
@@ -1377,6 +2122,7 @@ function stopFactCheck() {
   utteranceBuffer = '';
 
   clearPipelineError('stopped');
+  lastAnalysisDebug = null;
   resetWindow();
   recentClaims.clear();
 
