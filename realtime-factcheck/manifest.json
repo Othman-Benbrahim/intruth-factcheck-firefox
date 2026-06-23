@@ -12,14 +12,15 @@
   "permissions": [
     "activeTab",
     "scripting",
-    "storage",
-    "tabCapture"
+    "storage"
   ],
   "host_permissions": [
     "https://api.anthropic.com/*",
     "https://google.serper.dev/*",
     "https://fonts.googleapis.com/*",
-    "https://fonts.gstatic.com/*"
+    "https://fonts.gstatic.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "background": {
     "scripts": ["src/background/service-worker.js"]
@@ -42,7 +43,8 @@
       "js": [
         "src/content/lexical-features.js",
         "src/content/session-export.js",
-        "src/content/overlay.js"
+        "src/content/overlay.js",
+        "src/content/capture.js"
       ],
       "css": ["src/content/overlay.css"]
     }
