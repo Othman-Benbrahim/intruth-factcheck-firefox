@@ -1,33 +1,42 @@
 // service-worker.js  (Firefox — background event page)
-// Adapté de la version Chrome : la capture audio et la connexion Deepgram
-// (auparavant dans un document offscreen) sont désormais gérées directement ici.
-// Pipeline : capture audio -> Deepgram (WebSocket) -> détection de claims
-// (Claude + Serper) -> verdicts envoyés au content script (overlay).
+// La capture audio est déléguée au content script (src/content/capture.js) via
+// getUserMedia, parce que Firefox n'expose ni tabCapture ni l'audio de
+// getDisplayMedia. Ce script reçoit des fragments audio (AUDIO_CHUNK), les pousse
+// vers Deepgram (WebSocket), puis fait tourner le pipeline d'analyse inchangé
+// (Claude + Serper) et renvoie les verdicts à l'overlay.
 //
-// 5.31.2026 -- serper call before claude call for more accurate verdicts
-// 6.12.2026 -- switch to deepgram
-// 6.23.2026 -- portage Firefox : suppression offscreen, capture déplacée ici
+// Note : ce background est agnostique de la SOURCE audio. Si un jour Firefox
+// supporte l'audio de getDisplayMedia, seul capture.js changerait.
 
 // ── Polyfill namespace : browser.* (Firefox) ou chrome.* (fallback) ───────────
 const browserAPI = typeof browser !== 'undefined' ? browser : chrome;
 
-let ANTHROPIC_KEY = '';
-let DEEPGRAM_KEY  = '';
-const SERPER_KEY  = '';
+// ── Configuration LLM (Anthropic OU endpoint compatible OpenAI / LM Studio) ────
+let LLM_PROVIDER = 'anthropic';   // 'anthropic' | 'openai'
+let LLM_API_KEY  = '';            // clé du fournisseur actif (peut être vide pour LM Studio local)
+let LLM_ENDPOINT = '';            // base URL compatible OpenAI, ex. http://localhost:1234/v1
+let LLM_MODEL    = '';            // identifiant du modèle
+let DEEPGRAM_KEY = '';
+const SERPER_KEY = '';
 
-// ── État capture audio (auparavant dans offscreen-ex.js) ──────────────────────
-let mediaStream     = null;
-let audioContext    = null;
-let processor       = null;
+const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
+
+// ── État Deepgram ─────────────────────────────────────────────────────────────
 let deepgramSocket  = null;
 let utteranceBuffer = '';
+let audioFlowing    = false;   // true tant que le content script envoie de l'audio
 
 async function loadKeys() {
-  // Sous Firefox, browser.storage.local.get renvoie une Promise (pas de callback).
-  // On reste donc en async/await pour fonctionner dans les deux navigateurs.
-  const data = await browserAPI.storage.local.get(['anthropicKey', 'deepgramKey']);
-  ANTHROPIC_KEY = data.anthropicKey || '';
-  DEEPGRAM_KEY  = data.deepgramKey  || '';
+  // browser.storage renvoie une Promise sous Firefox (pas de callback).
+  const data = await browserAPI.storage.local.get([
+    'deepgramKey', 'llmProvider', 'llmApiKey', 'llmEndpoint', 'llmModel', 'anthropicKey',
+  ]);
+  DEEPGRAM_KEY = data.deepgramKey || '';
+  LLM_PROVIDER = data.llmProvider || 'anthropic';
+  LLM_ENDPOINT = (data.llmEndpoint || '').trim();
+  LLM_MODEL    = (data.llmModel    || '').trim();
+  // rétro-compatibilité : si une ancienne clé Anthropic existe, on la réutilise
+  LLM_API_KEY  = (data.llmApiKey || data.anthropicKey || '').trim();
 }
 
 const EVALUATE_PROMPT = ``;
@@ -87,32 +96,80 @@ async function searchWeb(query, retries = 2) {
 
 // ── Claude ────────────────────────────────────────────────────────────────────
 
-async function callClaude(userMessage, systemPrompt) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_KEY,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 768,
-      temperature: 0,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userMessage }],
-    }),
-  });
-  const data = await res.json();
-  if (data.error) {
-    const msg = data.error.message || 'Unknown API error';
-    console.error('[claude] API error:', msg);
-    if (activeTabId) browserAPI.tabs.sendMessage(activeTabId, { type: 'PIPELINE_ERROR', message: msg }).catch(() => {});
+function stripFences(raw) {
+  return (raw || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+}
+
+function reportLLMError(msg) {
+  console.error('[llm] API error:', msg);
+  if (activeTabId) browserAPI.tabs.sendMessage(activeTabId, { type: 'PIPELINE_ERROR', message: msg }).catch(() => {});
+}
+
+// Point d'entrée unique : route vers Anthropic ou un endpoint compatible OpenAI.
+async function callLLM(userMessage, systemPrompt) {
+  if (LLM_PROVIDER === 'openai') return callOpenAICompatible(userMessage, systemPrompt);
+  return callAnthropic(userMessage, systemPrompt);
+}
+
+async function callAnthropic(userMessage, systemPrompt) {
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': LLM_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: LLM_MODEL || DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: 768,
+        temperature: 0,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userMessage }],
+      }),
+    });
+    const data = await res.json();
+    if (data.error) { reportLLMError(data.error.message || 'Unknown API error'); return ''; }
+    return stripFences(data.content?.[0]?.text?.trim() || '');
+  } catch (err) {
+    reportLLMError('Anthropic : ' + err.message);
     return '';
   }
-  const raw = data.content?.[0]?.text?.trim() || '';
-  return raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+}
+
+// Compatible OpenAI : OpenAI, LM Studio (ex. http://localhost:1234/v1), ou tout
+// fournisseur exposant l'endpoint /chat/completions.
+async function callOpenAICompatible(userMessage, systemPrompt) {
+  try {
+    const base = LLM_ENDPOINT.replace(/\/+$/, '');   // on enlève un éventuel "/" final
+    const url  = base + '/chat/completions';
+    const headers = { 'Content-Type': 'application/json' };
+    if (LLM_API_KEY) headers['Authorization'] = 'Bearer ' + LLM_API_KEY; // facultatif pour LM Studio local
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: LLM_MODEL,
+        max_tokens: 768,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userMessage },
+        ],
+      }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      reportLLMError(typeof data.error === 'string' ? data.error : (data.error.message || 'Erreur LLM'));
+      return '';
+    }
+    return stripFences(data.choices?.[0]?.message?.content?.trim() || '');
+  } catch (err) {
+    reportLLMError('Endpoint LLM injoignable : ' + err.message);
+    return '';
+  }
 }
 
 function parseArray(str) {
@@ -217,7 +274,6 @@ function isDuplicate(claim) {
 const WINDOW_SIZE = 4;
 const WINDOW_KEEP = 15;
 
-// Each entry: { text, speakerId, speakerName }
 let sentenceWindow  = [];
 let sentenceCount   = 0;
 let windowLexical   = { rates: { hedging: 0, certainty: 0, filler: 0, emotional: 0, exclusive: 0, firstPersonSg: 0 }, wordsPerSecond: null, wordCount: 0 };
@@ -225,9 +281,9 @@ let windowStartTime = null;
 let pageTitle       = '';
 let pageDate        = '';
 let currentSpeakerId  = null;
-let lastSpeakerId     = null;   // déclaration explicite (était un global implicite)
-let speakerIdToName   = {};  // confirmed: { 0: 'Harris', 1: 'Trump' }
-let confirmedSpeakers = new Set(); // IDs that have been confirmed by user
+let lastSpeakerId     = null;
+let speakerIdToName   = {};
+let confirmedSpeakers = new Set();
 
 function resetWindow() {
   sentenceWindow   = [];
@@ -241,14 +297,12 @@ function resetWindow() {
 }
 
 async function onNewSentence(text, speakerId) {
-  // flush window early on speaker change (mid-window turn transition)
   if (lastSpeakerId !== null &&
       speakerId !== null &&
       speakerId !== undefined &&
       speakerId !== lastSpeakerId &&
       sentenceCount % WINDOW_SIZE !== 0 &&
       sentenceWindow.length >= 2) {
-    // fire evaluation for the previous speaker's sentences before processing this one
     const flushText = sentenceWindow.map(s => s.text).join(' ');
     const flushCounts = {};
     sentenceWindow.slice(-WINDOW_SIZE).forEach(s => {
@@ -267,7 +321,6 @@ async function onNewSentence(text, speakerId) {
   }
   lastSpeakerId = speakerId;
 
-  // label with confirmed name if available, else Speaker N for Claude to infer
   const confirmedName = (speakerId !== null && speakerId !== undefined) ? speakerIdToName[speakerId] : null;
   const label         = confirmedName ? `[${confirmedName}]` : (speakerId !== null && speakerId !== undefined ? `[Speaker ${speakerId}]` : null);
   const labeledText   = label ? `${label} ${text}` : text;
@@ -278,7 +331,6 @@ async function onNewSentence(text, speakerId) {
 
   if (!windowStartTime) windowStartTime = Date.now();
 
-  // accumulate lexical
   const f = extractLexical(text);
   const r = f.rates, wr = windowLexical.rates;
   wr.hedging       = Math.round((wr.hedging       + r.hedging)       / 2);
@@ -292,8 +344,6 @@ async function onNewSentence(text, speakerId) {
   if (sentenceCount % WINDOW_SIZE === 0) {
     const contextText = sentenceWindow.map(s => s.text).join(' ');
 
-    // dominant speaker ID = whoever appears most in this window
-    // count only the CURRENT window's sentences (last WINDOW_SIZE), not full rolling buffer
     const currentWindowSentences = sentenceWindow.slice(-WINDOW_SIZE);
     const counts = {};
     currentWindowSentences.forEach(s => {
@@ -304,12 +354,10 @@ async function onNewSentence(text, speakerId) {
     const dominantSpeakerId = Object.keys(counts).length
       ? Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]
       : null;
-    // use confirmed name from speakerIdToName — ground truth from Deepgram + user confirmation
     const dominantSpeaker = dominantSpeakerId !== null
       ? (speakerIdToName[dominantSpeakerId] || null)
       : null;
 
-    // speech rate
     const elapsed = windowStartTime ? (Date.now() - windowStartTime) / 1000 : null;
     if (elapsed && elapsed > 0) windowLexical.wordsPerSecond = Math.round(windowLexical.wordCount / elapsed * 10) / 10;
     windowStartTime = null;
@@ -317,7 +365,6 @@ async function onNewSentence(text, speakerId) {
     const lexicalSnapshot = JSON.parse(JSON.stringify(windowLexical));
     const lexicalSummary  = buildLexicalSummary(lexicalSnapshot);
 
-    // reset for next window
     windowLexical   = { rates: { hedging: 0, certainty: 0, filler: 0, emotional: 0, exclusive: 0, firstPersonSg: 0 }, wordsPerSecond: null, wordCount: 0 };
     windowStartTime = null;
 
@@ -334,7 +381,6 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
   try {
     const dateContext    = pageDate ? `\nDate: ${pageDate}` : '';
 
-    // build speaker legend from title names for Claude
     const titleNames    = parseSpeakersFromTitle(title || '');
     const nameList = titleNames.join(' and ');
     const speakerLegend = titleNames.length
@@ -352,7 +398,6 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       : '';
     const lexicalContext = lexicalSummary ? `\n\nLexical analysis: ${lexicalSummary}` : '';
 
-    // already-checked claims list for Claude
     const checkedList = [...recentClaims.values()]
       .filter(v => Array.isArray(v) && v[1])
       .map(v => v[1])
@@ -362,7 +407,7 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       ? `\n\nClaims already fact-checked this session — do NOT re-evaluate these or close variants:\n- ${checkedList}\n`
       : '';
 
-    const raw     = await callClaude(
+    const raw     = await callLLM(
       `${titleContext}Transcript: "${contextText}"${alreadyChecked}${lexicalContext}`,
       EVALUATE_PROMPT
     );
@@ -379,7 +424,7 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
           sources:          [],
           pending:          true,
           lexical:          lexicalSnapshot,
-          dominantSpeakerId, // raw Deepgram ID — overlay resolves to name at render time
+          dominantSpeakerId,
           speaker:          dominantSpeaker || (r.speaker && !r.speaker.match(/^Speaker\s*\d+$/i) ? r.speaker : null),
         })),
       }).catch(() => {});
@@ -405,14 +450,13 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
       try {
         const urls = await searchWeb(fastResult.claim);
         if (!urls.length) return null;
-        const raw = await callClaude(
+        const raw = await callLLM(
           `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nWeb search results:\n${urls.join('\n')}${lexicalContext}`,
           EVALUATE_PROMPT
         );
         const results = parseArray(raw);
         const match   = results.find(r => r.claim && r.verdict);
         if (!match) return null;
-        // re-resolve speaker at grounding time — user may have confirmed since fast pass
         const lateResolved = dominantSpeakerId !== null && dominantSpeakerId !== undefined
           ? speakerIdToName[dominantSpeakerId] || null
           : null;
@@ -421,7 +465,6 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
           || (match.speaker && !match.speaker.match(/^Speaker\s*\d+$/i) ? match.speaker : null)
           || (fastResult.speaker && !fastResult.speaker.match(/^Speaker\s*\d+$/i) ? fastResult.speaker : null);
 
-        // never downgrade TRUE to MISLEADING in grounded pass — fast verdict had no sources to nitpick
         const fastWasTrue = fastResult.verdict === 'TRUE' || fastResult.verdict === 'SUBSTANTIALLY TRUE';
         const groundedIsMisleading = match.verdict === 'MISLEADING';
         const finalVerdict = (fastWasTrue && groundedIsMisleading) ? fastResult.verdict : match.verdict;
@@ -443,83 +486,40 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
   }
 }
 
-// ── État global ───────────────────────────────────────────────────────────────
+// ── Transcription Deepgram -> overlay + analyse ───────────────────────────────
+// (logique de suivi du locuteur reprise de l'ancien handler TRANSCRIPT_RESULT)
 
-let activeTabId = null;
-let isCapturing = false;
-let keepAliveInterval = null;
+function onTranscriptionResult(text, isFinal, isInterim, speaker) {
+  if (activeTabId) {
+    browserAPI.tabs.sendMessage(activeTabId, {
+      type: 'TRANSCRIPT_RESULT',
+      text,
+      isFinal,
+      interim: isInterim,
+    }).catch(() => {});
+  }
 
-function startKeepAlive() {
-  keepAliveInterval = setInterval(() => browserAPI.runtime.getPlatformInfo(() => {}), 20000);
-}
-
-function stopKeepAlive() {
-  clearInterval(keepAliveInterval);
-  keepAliveInterval = null;
-}
-
-// ── Capture audio (déplacée depuis offscreen-ex.js) ───────────────────────────
-
-async function startCapture() {
-  if (isCapturing) stopCapture();
-  isCapturing = true;
-
-  try {
-    // Les clés sont normalement déjà chargées par startFactCheck ;
-    // on recharge ici pour rendre startCapture autonome (cas reconnexion).
-    await loadKeys();
-
-    // Firefox : capture directe du flux audio de l'onglet actif.
-    mediaStream = await browserAPI.tabCapture.capture({
-      audio: true,
-      video: false,
-    });
-
-    await connectDeepgram();
-    startAudioPipeline();
-
-    console.log('[background] capture & deepgram démarrés');
-  } catch (err) {
-    console.error('[background] erreur capture:', err);
-    isCapturing = false;
-    if (activeTabId) {
-      browserAPI.tabs.sendMessage(activeTabId, {
-        type: 'PIPELINE_ERROR',
-        message: 'Erreur de capture audio : ' + err.message,
-      }).catch(() => {});
+  if (isFinal) {
+    if (speaker !== null && speaker !== undefined) {
+      currentSpeakerId = speaker;
+      if (activeTabId && !confirmedSpeakers.has(currentSpeakerId) && !speakerIdToName[currentSpeakerId]) {
+        browserAPI.tabs.sendMessage(activeTabId, {
+          type:      'NEW_SPEAKER',
+          speakerId: currentSpeakerId,
+          sample:    text.slice(0, 80),
+        }).catch(() => {});
+      }
     }
+    onNewSentence(text, currentSpeakerId);
   }
 }
 
-function stopCapture() {
-  // Démontage de la couche audio/Deepgram uniquement.
-  // Les réinitialisations métier (recentClaims, fenêtre) sont faites par
-  // stopFactCheck, pour ne PAS effacer l'état lors d'une simple reconnexion.
-  isCapturing = false;
-  utteranceBuffer = '';
-
-  if (deepgramSocket) {
-    deepgramSocket.close();
-    deepgramSocket = null;
-  }
-  if (processor) {
-    processor.disconnect();
-    processor = null;
-  }
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(t => t.stop());
-    mediaStream = null;
-  }
-  if (audioContext) {
-    audioContext.close();
-    audioContext = null;
-  }
-
-  console.log('[background] capture arrêtée');
-}
+// ── Deepgram (WebSocket dans le background — non soumis au CSP de la page) ─────
 
 function connectDeepgram() {
   return new Promise((resolve, reject) => {
+    if (!DEEPGRAM_KEY) { reject(new Error('Deepgram key missing')); return; }
+
     deepgramSocket = new WebSocket(
       'wss://api.deepgram.com/v1/listen?' + [
         'encoding=linear16',
@@ -564,9 +564,7 @@ function connectDeepgram() {
         if (!text) return;
 
         if (isFinal && speech) {
-          const fullText = utteranceBuffer
-            ? utteranceBuffer + ' ' + text
-            : text;
+          const fullText = utteranceBuffer ? utteranceBuffer + ' ' + text : text;
           utteranceBuffer = '';
           onTranscriptionResult(fullText.trim(), true, false, speaker);
         } else if (isFinal && !speech) {
@@ -592,7 +590,7 @@ function connectDeepgram() {
 
     deepgramSocket.onclose = (e) => {
       console.log('[background] Deepgram fermé:', e.code, e.reason);
-      if ((e.code === 1008 || e.code === 1011) && isCapturing) {
+      if (e.code === 1008 || e.code === 1011) {
         if (activeTabId) {
           browserAPI.tabs.sendMessage(activeTabId, {
             type: 'PIPELINE_ERROR',
@@ -601,7 +599,8 @@ function connectDeepgram() {
         }
         return;
       }
-      if (isCapturing) {
+      // reconnexion seulement si une session est active ET que l'audio circule encore
+      if (isCapturing && audioFlowing) {
         if (activeTabId) {
           browserAPI.tabs.sendMessage(activeTabId, {
             type: 'PIPELINE_ERROR',
@@ -609,75 +608,35 @@ function connectDeepgram() {
           }).catch(() => {});
         }
         setTimeout(() => {
-          if (isCapturing) startCapture();
+          if (isCapturing && audioFlowing) connectDeepgram().catch(() => {});
         }, 1000);
       }
     };
   });
 }
 
-function startAudioPipeline() {
-  audioContext = new AudioContext({ sampleRate: 16000 });
-  const source = audioContext.createMediaStreamSource(mediaStream);
+// ── État session ──────────────────────────────────────────────────────────────
 
-  // Réinjecte l'audio pour que l'utilisateur entende toujours la vidéo.
-  source.connect(audioContext.destination);
+let activeTabId = null;
+let isCapturing = false;
+let keepAliveInterval = null;
 
-  processor = audioContext.createScriptProcessor(4096, 1, 1);
-  processor.onaudioprocess = (e) => {
-    if (deepgramSocket?.readyState !== WebSocket.OPEN) return;
-
-    const float32 = e.inputBuffer.getChannelData(0);
-    const int16 = new Int16Array(float32.length);
-    for (let i = 0; i < float32.length; i++) {
-      int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-    }
-    deepgramSocket.send(int16.buffer);
-  };
-
-  source.connect(processor);
-  processor.connect(audioContext.destination);
-
-  console.log('[background] pipeline audio démarré');
+function startKeepAlive() {
+  keepAliveInterval = setInterval(() => browserAPI.runtime.getPlatformInfo(() => {}), 20000);
 }
 
-// Pont Deepgram -> overlay + détection de claims.
-// Reprend la logique de suivi du locuteur qui se trouvait auparavant dans le
-// handler de message 'TRANSCRIPT_RESULT' du service worker.
-function onTranscriptionResult(text, isFinal, isInterim, speaker) {
-  // 1. Affichage temps réel dans l'overlay (content script)
-  if (activeTabId) {
-    browserAPI.tabs.sendMessage(activeTabId, {
-      type: 'TRANSCRIPT_RESULT',
-      text,
-      isFinal,
-      interim: isInterim,
-    }).catch(() => {});
-  }
-
-  // 2. Phrase finale -> suivi du locuteur + bannière "nouveau locuteur" + analyse
-  if (isFinal) {
-    if (speaker !== null && speaker !== undefined) {
-      currentSpeakerId = speaker;
-      if (activeTabId && !confirmedSpeakers.has(currentSpeakerId) && !speakerIdToName[currentSpeakerId]) {
-        browserAPI.tabs.sendMessage(activeTabId, {
-          type:      'NEW_SPEAKER',
-          speakerId: currentSpeakerId,
-          sample:    text.slice(0, 80),
-        }).catch(() => {});
-      }
-    }
-    onNewSentence(text, currentSpeakerId);
-  }
+function stopKeepAlive() {
+  clearInterval(keepAliveInterval);
+  keepAliveInterval = null;
 }
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 browserAPI.runtime.onConnect.addListener(() => console.log('[service-worker] woken by port connect'));
 
-// notify overlay if background was killed and restarted mid-session
 browserAPI.runtime.onStartup.addListener(() => {
   isCapturing = false;
+  audioFlowing = false;
   activeTabId = null;
 });
 
@@ -695,8 +654,42 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       break;
 
+    // Le content script a obtenu le flux micro -> on ouvre Deepgram
+    case 'CAPTURE_STARTED':
+      audioFlowing = true;
+      if (isCapturing) {
+        connectDeepgram().catch((err) => {
+          if (activeTabId) browserAPI.tabs.sendMessage(activeTabId, {
+            type: 'PIPELINE_ERROR', message: 'Deepgram : ' + err.message,
+          }).catch(() => {});
+        });
+      }
+      break;
+
+    // Fragment audio (Int16 PCM 16 kHz) envoyé par le content script
+    case 'AUDIO_CHUNK':
+      if (msg.chunk && deepgramSocket && deepgramSocket.readyState === WebSocket.OPEN) {
+        deepgramSocket.send(msg.chunk);
+      }
+      break;
+
+    // L'utilisateur a arrêté le partage micro (ou la piste s'est terminée)
+    case 'CAPTURE_ENDED':
+      audioFlowing = false;
+      if (deepgramSocket) { deepgramSocket.close(); deepgramSocket = null; }
+      utteranceBuffer = '';
+      if (activeTabId) browserAPI.tabs.sendMessage(activeTabId, {
+        type: 'PIPELINE_ERROR', message: 'Capture audio arrêtée.',
+      }).catch(() => {});
+      break;
+
+    case 'CAPTURE_ERROR':
+      if (activeTabId) browserAPI.tabs.sendMessage(activeTabId, {
+        type: 'PIPELINE_ERROR', message: msg.message || 'Erreur de capture audio.',
+      }).catch(() => {});
+      break;
+
     case 'SPEAKER_NAMES':
-      // merge incoming confirmed entries — never overwrite already-confirmed IDs
       if (msg.speakerIdToName) {
         Object.entries(msg.speakerIdToName).forEach(([id, name]) => {
           const numId = parseInt(id);
@@ -714,11 +707,9 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       pageDate  = msg.date  || '';
       console.log('[service-worker] page title:', pageTitle.slice(0, 60));
       console.log('[service-worker] page date:', pageDate);
-      // speaker names passed to Claude as context — Claude resolves attribution
       break;
 
     case 'PIPELINE_ERROR':
-      // forward to overlay (au cas où un autre contexte en émettrait)
       if (activeTabId) {
         browserAPI.tabs.sendMessage(activeTabId, { type: 'PIPELINE_ERROR', message: msg.message }).catch(() => {});
       }
@@ -736,47 +727,52 @@ async function startFactCheck() {
   if (isCapturing) return;
 
   await loadKeys();
-  if (!ANTHROPIC_KEY) {
-    throw new Error('Anthropic API key not set. Please enter it in the extension popup.');
-  }
   if (!DEEPGRAM_KEY) {
-    throw new Error('Deepgram API key not set. Please enter it in the extension popup.');
+    throw new Error('Clé API Deepgram absente. Renseignez-la dans le popup.');
+  }
+  if (LLM_PROVIDER === 'openai') {
+    if (!LLM_ENDPOINT) throw new Error('Endpoint LLM absent (ex. http://localhost:1234/v1).');
+    if (!LLM_MODEL)    throw new Error('Identifiant du modèle LLM absent.');
+  } else {
+    if (!LLM_API_KEY)  throw new Error('Clé API Anthropic absente. Renseignez-la dans le popup.');
   }
 
   const [tab] = await browserAPI.tabs.query({ active: true, currentWindow: true });
   if (!tab) throw new Error('No active tab found.');
   activeTabId = tab.id;
 
-  // reset AVANT le démarrage du content script — les transcriptions arrivent vite
   resetWindow();
   recentClaims.clear();
+  isCapturing  = true;
+  audioFlowing = false;
   startKeepAlive();
 
+  // Le content script affiche l'overlay et le bouton "Activer le micro".
+  // Deepgram ne s'ouvre qu'au message CAPTURE_STARTED (après le clic utilisateur).
   await browserAPI.tabs.sendMessage(activeTabId, { type: 'START_FACTCHECK' });
 
-  // Capture audio directe (plus d'offscreen ni de stream-ID sous Firefox)
-  await startCapture();
-
-  console.log('[service-worker] started on tab', activeTabId);
+  console.log('[service-worker] session démarrée sur l\'onglet', activeTabId);
 }
 
 function stopFactCheck() {
   pageTitle = '';
   pageDate  = '';
 
-  if (!isCapturing) {
-    resetWindow();
-    recentClaims.clear();
-    return;
-  }
+  const wasCapturing = isCapturing;
+  isCapturing  = false;
+  audioFlowing = false;
 
-  stopCapture();          // démonte audio + Deepgram
-  resetWindow();          // réinitialisations métier au niveau session
+  if (deepgramSocket) { deepgramSocket.close(); deepgramSocket = null; }
+  utteranceBuffer = '';
+
+  resetWindow();
   recentClaims.clear();
 
-  if (activeTabId) browserAPI.tabs.sendMessage(activeTabId, { type: 'STOP_FACTCHECK' }).catch(() => {});
+  if (wasCapturing && activeTabId) {
+    browserAPI.tabs.sendMessage(activeTabId, { type: 'STOP_FACTCHECK' }).catch(() => {});
+  }
 
   activeTabId = null;
   stopKeepAlive();
-  console.log('[service-worker] stopped');
+  console.log('[service-worker] session arrêtée');
 }
