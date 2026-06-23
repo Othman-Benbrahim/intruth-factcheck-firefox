@@ -14,14 +14,35 @@
     <div class="status" id="status">Inactive</div>
 
     <div class="keys-section" id="keysSection">
+
       <div class="key-field">
-        <label class="key-label">Anthropic API Key</label>
-        <input class="key-input" id="anthropicKey" type="password" placeholder="sk-ant-..." autocomplete="off"/>
+        <label class="key-label">Fournisseur LLM</label>
+        <select class="key-input" id="llmProvider">
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">Compatible OpenAI / LM Studio</option>
+        </select>
       </div>
+
+      <div class="key-field" id="endpointField" style="display:none;">
+        <label class="key-label">Endpoint (URL de base)</label>
+        <input class="key-input" id="llmEndpoint" type="text" placeholder="http://localhost:1234/v1" autocomplete="off"/>
+      </div>
+
+      <div class="key-field">
+        <label class="key-label" id="modelLabel">Modèle</label>
+        <input class="key-input" id="llmModel" type="text" placeholder="claude-haiku-4-5-20251001" autocomplete="off"/>
+      </div>
+
+      <div class="key-field">
+        <label class="key-label" id="apiKeyLabel">Clé API</label>
+        <input class="key-input" id="llmApiKey" type="password" placeholder="sk-..." autocomplete="off"/>
+      </div>
+
       <div class="key-field">
         <label class="key-label">Deepgram API Key</label>
-        <input class="key-input" id="deepgramKey" type="password" placeholder="Votre clé API Deepgram..." autocomplete="off"/>
+        <input class="key-input" id="deepgramKey" type="password" placeholder="Clé API Deepgram..." autocomplete="off"/>
       </div>
+
       <div class="key-hint" id="keyHint"></div>
     </div>
 
