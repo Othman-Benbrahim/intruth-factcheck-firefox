@@ -192,9 +192,13 @@ async function validateAnthropicKey(config) {
       },
       body: JSON.stringify({
         model: config.model || DEFAULT_ANTHROPIC_MODEL,
-        max_tokens: 4,
+        max_tokens: 160,
         temperature: 0,
-        messages: [{ role: 'user', content: 'Reply OK.' }],
+        system: 'Return only valid JSON. No Markdown. No extra text.',
+        messages: [{
+          role: 'user',
+          content: 'Health check: return exactly this JSON array with no extra text: [{"claim":"The sky is blue.","claim_fr":"Le ciel est bleu.","claim_en":"The sky is blue.","verdict":"TRUE","speaker":"Unknown","explanation":"Basic factual test.","confidence":0.9}]',
+        }],
       }),
     });
 
@@ -202,7 +206,18 @@ async function validateAnthropicKey(config) {
       const apiMessage = data?.error?.message || data?.error || ('HTTP ' + res.status);
       return { ok: false, source: 'llm', message: 'Anthropic invalide : ' + apiMessage };
     }
-    return { ok: true, source: 'llm', message: 'Clé Anthropic valide.' };
+    const content = stripFences(data?.content?.[0]?.text || '');
+    const parsed = parseArrayWithDiagnostics(content);
+    if (!parsed.ok || !parsed.results.length) {
+      return {
+        ok: false,
+        source: 'llm',
+        message: 'Anthropic joignable, mais format JSON d’analyse non conforme.',
+        details: parsed.rawPreview,
+      };
+    }
+
+    return { ok: true, source: 'llm', message: 'Clé Anthropic valide et format JSON compatible.' };
   } catch (err) {
     const suffix = err?.name === 'AbortError' ? 'délai dépassé' : err.message;
     return { ok: false, source: 'llm', message: 'Anthropic injoignable : ' + suffix };
@@ -227,11 +242,11 @@ async function validateOpenAICompatibleKey(config) {
       headers,
       body: JSON.stringify({
         model: config.model,
-        max_tokens: 4,
+        max_tokens: 160,
         temperature: 0,
         messages: [
-          { role: 'system', content: 'You are a health check endpoint.' },
-          { role: 'user', content: 'Reply OK.' },
+          { role: 'system', content: 'Return only valid JSON. No Markdown. No extra text.' },
+          { role: 'user', content: 'Health check: return exactly this JSON array with no extra text: [{"claim":"The sky is blue.","claim_fr":"Le ciel est bleu.","claim_en":"The sky is blue.","verdict":"TRUE","speaker":"Unknown","explanation":"Basic factual test.","confidence":0.9}]' },
         ],
       }),
     });
@@ -248,7 +263,17 @@ async function validateOpenAICompatibleKey(config) {
       return { ok: false, source: 'llm', message: 'Endpoint LLM joignable, mais réponse inattendue.' };
     }
 
-    return { ok: true, source: 'llm', message: 'Endpoint LLM valide.' };
+    const parsed = parseArrayWithDiagnostics(content);
+    if (!parsed.ok || !parsed.results.length) {
+      return {
+        ok: false,
+        source: 'llm',
+        message: 'Endpoint LLM joignable, mais format JSON d’analyse non conforme.',
+        details: parsed.rawPreview,
+      };
+    }
+
+    return { ok: true, source: 'llm', message: 'Endpoint LLM valide et format JSON compatible.' };
   } catch (err) {
     const suffix = err?.name === 'AbortError' ? 'délai dépassé' : err.message;
     return { ok: false, source: 'llm', message: 'Endpoint LLM injoignable : ' + suffix };
@@ -550,12 +575,103 @@ async function callOpenAICompatible(userMessage, systemPrompt) {
   }
 }
 
+function previewLLMResponse(str, limit = 260) {
+  const clean = String(str || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  return clean.length > limit ? clean.slice(0, limit) + '…' : clean;
+}
+
+function normalizeParsedLLMValue(value) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object') {
+    const possibleArrays = [
+      value.results,
+      value.claims,
+      value.verdicts,
+      value.data,
+      value.output,
+      value.items,
+    ];
+    const found = possibleArrays.find(Array.isArray);
+    if (found) return found;
+    if (value.claim && value.verdict) return [value];
+  }
+  return null;
+}
+
+function parseArrayWithDiagnostics(str) {
+  const raw = String(str || '').trim();
+  if (!raw) {
+    return {
+      ok: false,
+      results: [],
+      reason: 'empty',
+      message: 'LLM : réponse vide, aucune analyse exploitable reçue.',
+      rawPreview: '',
+    };
+  }
+
+  const cleaned = stripFences(raw).trim();
+  const rawPreview = previewLLMResponse(cleaned);
+
+  try {
+    const direct = JSON.parse(cleaned);
+    const normalized = normalizeParsedLLMValue(direct);
+    if (normalized) {
+      return { ok: true, results: normalized, reason: 'json', rawPreview };
+    }
+    return {
+      ok: false,
+      results: [],
+      reason: 'json-not-array',
+      message: 'LLM : JSON reçu, mais il ne contient pas de tableau de verdicts exploitable.',
+      rawPreview,
+    };
+  } catch (_) {
+    // Beaucoup de fournisseurs ajoutent parfois une phrase avant/après le JSON.
+    // On tente donc d'extraire le premier tableau JSON présent dans la réponse.
+  }
+
+  const start = cleaned.indexOf('[');
+  const end   = cleaned.lastIndexOf(']');
+  if (start === -1 || end === -1 || end <= start) {
+    return {
+      ok: false,
+      results: [],
+      reason: 'no-array',
+      message: 'LLM : réponse non conforme. Un tableau JSON était attendu, mais aucun tableau JSON n’a été trouvé.',
+      rawPreview,
+    };
+  }
+
+  const candidate = cleaned.slice(start, end + 1);
+  try {
+    const parsed = JSON.parse(candidate);
+    const normalized = normalizeParsedLLMValue(parsed);
+    if (normalized) {
+      return { ok: true, results: normalized, reason: 'extracted-array', rawPreview };
+    }
+    return {
+      ok: false,
+      results: [],
+      reason: 'extracted-not-array',
+      message: 'LLM : tableau JSON extrait, mais contenu inexploitable.',
+      rawPreview,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      results: [],
+      reason: 'invalid-json',
+      message: 'LLM : JSON invalide reçu. Le modèle répond, mais pas dans le format attendu.',
+      rawPreview,
+      parseError: err.message,
+    };
+  }
+}
+
 function parseArray(str) {
-  const start = str.indexOf('[');
-  const end   = str.lastIndexOf(']');
-  if (start === -1 || end === -1) return [];
-  try { return JSON.parse(str.slice(start, end + 1)); }
-  catch { return []; }
+  return parseArrayWithDiagnostics(str).results;
 }
 
 // ── Lexical features ──────────────────────────────────────────────────────────
@@ -806,6 +922,8 @@ async function onNewSentence(text, speakerId) {
     try {
       await evaluateClaims(contextText, pageTitle, lexicalSummary, lexicalSnapshot, dominantSpeaker, dominantSpeakerId);
     } catch (e) {
+      console.error('[pipeline] evaluateClaims failed:', e);
+      notifyPipelineError('Pipeline d’analyse : ' + (e?.message || e), 'pipeline', { fatal: true });
     }
   }
 }
@@ -842,14 +960,39 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       ? `\n\nClaims already fact-checked this session — do NOT re-evaluate these or close variants:\n- ${checkedList}\n`
       : '';
 
-    const raw     = await callLLM(
+    const raw = await callLLM(
       `${titleContext}Transcript: "${contextText}"${alreadyChecked}${lexicalContext}`,
       EVALUATE_PROMPT
     );
-    const results = parseArray(raw);
-    const valid   = results.filter(r => r.claim && r.verdict && !isDuplicate(r.claim));
 
-    if (!valid.length) return;
+    const parsed = parseArrayWithDiagnostics(raw);
+    if (!parsed.ok) {
+      console.warn('[pipeline] LLM response rejected:', parsed.reason, parsed.rawPreview || parsed.parseError || '');
+      notifyPipelineError(
+        parsed.message + (parsed.rawPreview ? ' Aperçu : ' + parsed.rawPreview : ''),
+        'llm',
+        { fatal: true }
+      );
+      return;
+    }
+
+    const results = parsed.results;
+    if (!results.length) {
+      console.info('[pipeline] LLM returned an empty JSON array: no factual claim in this window.');
+      return;
+    }
+
+    const invalidShapeCount = results.filter(r => !r || !r.claim || !r.verdict).length;
+    const valid = results.filter(r => r && r.claim && r.verdict && !isDuplicate(r.claim));
+
+    if (!valid.length) {
+      const message = invalidShapeCount
+        ? 'LLM : réponse reçue, mais aucun verdict exploitable. Les champs claim/verdict sont absents ou mal nommés.'
+        : 'LLM : uniquement des affirmations déjà analysées, aucun nouveau verdict à afficher.';
+      console.warn('[pipeline] no usable verdict after filtering:', { invalidShapeCount, results });
+      notifyPipelineError(message, 'llm', { fatal: invalidShapeCount > 0 });
+      return;
+    }
 
     if (activeTabId) {
       browserAPI.tabs.sendMessage(activeTabId, {
@@ -870,6 +1013,7 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
 
   } catch (err) {
     console.error('[pipeline] error:', err);
+    notifyPipelineError('Pipeline d’analyse : ' + (err?.message || err), 'pipeline', { fatal: true });
   }
 }
 
@@ -892,14 +1036,44 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
         ].filter(Boolean))].slice(0, 3);
         const urlGroups = await Promise.all(searchQueries.map(q => searchWeb(q)));
         const urls = [...new Set(urlGroups.flat())].slice(0, 5);
-        if (!urls.length) return null;
+        if (!urls.length) {
+          // La recherche web est indisponible ou n'a rien trouvé : on clôt le verdict rapide
+          // au lieu de laisser l'interface bloquée en état pending.
+          return {
+            ...fastResult,
+            sources: [],
+            pending: false,
+            lexical: lexicalSnapshot,
+            speaker: dominantSpeaker || (fastResult.speaker && !fastResult.speaker.match(/^Speaker\s*\d+$/i) ? fastResult.speaker : null),
+            dominantSpeakerId,
+          };
+        }
         const raw = await callLLM(
           `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nWeb search results:\n${urls.join('\n')}${lexicalContext}`,
           EVALUATE_PROMPT
         );
-        const results = parseArray(raw);
-        const match   = results.find(r => r.claim && r.verdict);
-        if (!match) return null;
+        const parsed = parseArrayWithDiagnostics(raw);
+        if (!parsed.ok) {
+          console.warn('[grounded] LLM response rejected:', parsed.reason, parsed.rawPreview || parsed.parseError || '');
+          notifyPipelineError(
+            'Analyse sourcée : réponse LLM non conforme. Le verdict rapide est conservé.',
+            'llm',
+            { fatal: false }
+          );
+          return { ...fastResult, sources: urls, pending: false, lexical: lexicalSnapshot, speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
+        }
+
+        const results = parsed.results;
+        const match = results.find(r => r && r.claim && r.verdict);
+        if (!match) {
+          console.warn('[grounded] no usable grounded verdict:', results);
+          notifyPipelineError(
+            'Analyse sourcée : réponse reçue mais aucun verdict exploitable. Le verdict rapide est conservé.',
+            'llm',
+            { fatal: false }
+          );
+          return { ...fastResult, sources: urls, pending: false, lexical: lexicalSnapshot, speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
+        }
         const lateResolved = dominantSpeakerId !== null && dominantSpeakerId !== undefined
           ? speakerIdToName[dominantSpeakerId] || null
           : null;
