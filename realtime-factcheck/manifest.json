@@ -3,27 +3,27 @@
   "name": "InTruth",
   "version": "1.1.0",
   "description": "Real-time fact-checking of political speech and debates",
-
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "intruth@azrivo.dev",
+      "strict_min_version": "115.0"
+    }
+  },
   "permissions": [
     "activeTab",
     "scripting",
     "storage",
-    "tabCapture",
-    "offscreen"
+    "tabCapture"
   ],
-
   "host_permissions": [
     "https://api.anthropic.com/*",
     "https://google.serper.dev/*",
     "https://fonts.googleapis.com/*",
-    "https://fonts.gstatic.com/*",
-    "wss://api.deepgram.com/*"
+    "https://fonts.gstatic.com/*"
   ],
-
   "background": {
-    "service_worker": "src/background/service-worker.js"
+    "scripts": ["src/background/service-worker.js"]
   },
-
   "action": {
     "default_popup": "src/popup/popup.html",
     "default_icon": {
@@ -32,7 +32,6 @@
       "128": "assets/icon128.png"
     }
   },
-
   "content_scripts": [
     {
       "matches": [
@@ -48,7 +47,6 @@
       "css": ["src/content/overlay.css"]
     }
   ],
-
   "icons": {
     "16": "assets/icon16.png",
     "48": "assets/icon48.png",
