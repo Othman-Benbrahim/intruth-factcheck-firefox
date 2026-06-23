@@ -24,6 +24,24 @@
         </select>
       </div>
 
+      <div class="key-field" id="presetField" style="display:none;">
+        <label class="key-label">Fournisseur (préréglage)</label>
+        <select class="key-input" id="llmPreset">
+          <option value="custom">Personnalisé (saisie manuelle)</option>
+          <option value="openrouter" data-url="https://openrouter.ai/api/v1" data-model="openai/gpt-4o-mini">OpenRouter — 290+ modèles</option>
+          <option value="openai" data-url="https://api.openai.com/v1">OpenAI</option>
+          <option value="groq" data-url="https://api.groq.com/openai/v1">Groq</option>
+          <option value="mistral" data-url="https://api.mistral.ai/v1">Mistral</option>
+          <option value="deepseek" data-url="https://api.deepseek.com">DeepSeek</option>
+          <option value="xai" data-url="https://api.x.ai/v1">xAI (Grok)</option>
+          <option value="together" data-url="https://api.together.xyz/v1">Together AI</option>
+          <option value="fireworks" data-url="https://api.fireworks.ai/inference/v1">Fireworks AI</option>
+          <option value="perplexity" data-url="https://api.perplexity.ai">Perplexity</option>
+          <option value="lmstudio" data-url="http://localhost:1234/v1">LM Studio (local)</option>
+          <option value="ollama" data-url="http://localhost:11434/v1">Ollama (local)</option>
+        </select>
+      </div>
+
       <div class="key-field" id="endpointField" style="display:none;">
         <label class="key-label">Endpoint (URL de base)</label>
         <input class="key-input" id="llmEndpoint" type="text" placeholder="http://localhost:1234/v1" autocomplete="off"/>

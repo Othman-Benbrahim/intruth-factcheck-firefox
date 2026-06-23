@@ -5,6 +5,8 @@ const statusEl     = document.getElementById('status');
 const providerEl   = document.getElementById('llmProvider');
 const endpointEl   = document.getElementById('llmEndpoint');
 const endpointField= document.getElementById('endpointField');
+const presetEl     = document.getElementById('llmPreset');
+const presetField  = document.getElementById('presetField');
 const modelEl      = document.getElementById('llmModel');
 const modelLabel   = document.getElementById('modelLabel');
 const apiKeyEl     = document.getElementById('llmApiKey');
@@ -102,7 +104,7 @@ chrome.storage.local.get(
       setRuntimeError(data.rtfcLastPipelineError, data.rtfcLastPipelineErrorAt, { persist: false });
     }
 
-    const finish = () => { applyProviderUI(); updateHint(); scheduleKeyValidation(); };
+    const finish = () => { applyProviderUI(); syncPresetToEndpoint(); updateHint(); scheduleKeyValidation(); };
 
     if (remember) {
       applyFields(data);
@@ -124,6 +126,7 @@ chrome.storage.local.get(
 function applyProviderUI() {
   const openai = providerEl.value === 'openai';
   endpointField.style.display = openai ? 'flex' : 'none';
+  if (presetField) presetField.style.display = openai ? 'flex' : 'none';
   if (reasoningField) reasoningField.style.display = openai ? 'flex' : 'none';
   apiKeyLabel.textContent = openai ? 'Clé API (facultative pour LM Studio local)' : 'Clé API Anthropic';
   modelLabel.textContent  = openai ? 'Modèle (identifiant)' : 'Modèle Anthropic (optionnel)';
@@ -156,6 +159,42 @@ function bindSave(el, key, opts) {
   });
 }
 bindSave(endpointEl, 'llmEndpoint');
+
+// ── Presets de fournisseurs ───────────────────────────────────────────────────
+// Aligne le menu déroulant sur l'URL d'endpoint courante (ou "Personnalisé").
+function syncPresetToEndpoint() {
+  if (!presetEl) return;
+  const url = endpointEl.value.trim();
+  let matched = 'custom';
+  for (const opt of presetEl.options) {
+    if (opt.dataset.url && opt.dataset.url === url) { matched = opt.value; break; }
+  }
+  presetEl.value = matched;
+}
+
+if (presetEl) {
+  // Choisir un préréglage remplit automatiquement l'endpoint.
+  presetEl.addEventListener('change', () => {
+    const opt = presetEl.selectedOptions[0];
+    if (!opt || presetEl.value === 'custom') return;
+    const url = opt.dataset.url || '';
+    if (url) {
+      endpointEl.value = url;
+      endpointEl.classList.add('saved');
+      persistKeys({ llmEndpoint: url });
+    }
+    // Indice de format du modèle (placeholder uniquement, on ne force pas la valeur)
+    const exampleModel = opt.dataset.model || '';
+    if (exampleModel && !modelEl.value.trim()) modelEl.placeholder = exampleModel;
+    resetValidationStatus('Préréglage appliqué — renseigne le modèle puis valide.');
+    updateHint();
+    scheduleKeyValidation(250);
+  });
+
+  // Si l'utilisateur modifie l'endpoint à la main, le menu repasse sur le bon
+  // préréglage (ou "Personnalisé").
+  endpointEl.addEventListener('input', syncPresetToEndpoint);
+}
 bindSave(modelEl,    'llmModel');
 bindSave(apiKeyEl,   'llmApiKey');
 bindSave(deepgramEl, 'deepgramKey');
