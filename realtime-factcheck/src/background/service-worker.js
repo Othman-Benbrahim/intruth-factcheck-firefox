@@ -26,6 +26,322 @@ let deepgramSocket  = null;
 let utteranceBuffer = '';
 let audioFlowing    = false;   // true tant que le content script envoie de l'audio
 
+
+// ── État pipeline / LLM ──────────────────────────────────────────────────────
+// Cet état est volontairement stocké côté service-worker, car la popup peut
+// s'ouvrir APRÈS l'erreur. Sans cela, GET_STATUS ne peut pas dire que l'IA est HS.
+let pipelineHealthy  = true;
+let llmHealthy       = true;
+let lastPipelineError = null;
+
+const PIPELINE_ERROR_STORAGE_KEYS = [
+  'rtfcLastPipelineError',
+  'rtfcLastPipelineErrorAt',
+  'rtfcLastPipelineErrorSource',
+];
+
+function maybeCatch(promiseLike) {
+  if (promiseLike && typeof promiseLike.catch === 'function') promiseLike.catch(() => {});
+}
+
+function persistPipelineError(errorInfo) {
+  try {
+    maybeCatch(browserAPI.storage.local.set({
+      rtfcLastPipelineError: errorInfo.message,
+      rtfcLastPipelineErrorAt: errorInfo.at,
+      rtfcLastPipelineErrorSource: errorInfo.source,
+    }));
+  } catch (_) {}
+}
+
+function clearStoredPipelineError() {
+  try { maybeCatch(browserAPI.storage.local.remove(PIPELINE_ERROR_STORAGE_KEYS)); }
+  catch (_) {}
+}
+
+function sendToActiveTab(payload) {
+  if (!activeTabId) return;
+  try { maybeCatch(browserAPI.tabs.sendMessage(activeTabId, payload)); }
+  catch (_) {}
+}
+
+function broadcastRuntime(payload) {
+  // Utile si la popup est ouverte. Le storage.local sert aussi de secours.
+  try { maybeCatch(browserAPI.runtime.sendMessage({ ...payload, origin: 'service-worker' })); }
+  catch (_) {}
+}
+
+function notifyPipelineError(message, source = 'pipeline', options = {}) {
+  const fatal = options.fatal !== false;
+  const cleanMessage = String(message || 'Erreur pipeline inconnue.').trim() || 'Erreur pipeline inconnue.';
+  const errorInfo = {
+    message: cleanMessage,
+    source,
+    fatal,
+    at: Date.now(),
+  };
+
+  if (fatal) {
+    pipelineHealthy = false;
+    if (source === 'llm') llmHealthy = false;
+    lastPipelineError = errorInfo;
+    persistPipelineError(errorInfo);
+  }
+
+  const payload = {
+    type: 'PIPELINE_ERROR',
+    message: cleanMessage,
+    source,
+    fatal,
+    at: errorInfo.at,
+    pipelineError: cleanMessage,
+    lastPipelineError: errorInfo,
+  };
+
+  sendToActiveTab(payload);
+  if (fatal) broadcastRuntime(payload);
+}
+
+function clearPipelineError(reason = 'pipeline') {
+  pipelineHealthy = true;
+  llmHealthy = true;
+  lastPipelineError = null;
+  clearStoredPipelineError();
+
+  const payload = {
+    type: 'PIPELINE_RECOVERED',
+    reason,
+    pipelineHealthy,
+    llmHealthy,
+    iaFunctional: true,
+    at: Date.now(),
+  };
+  sendToActiveTab(payload);
+  broadcastRuntime(payload);
+}
+
+function markLLMSuccess() {
+  llmHealthy = true;
+  if (lastPipelineError?.source === 'llm') clearPipelineError('llm');
+}
+
+function buildStatusResponse() {
+  const pipelineError = lastPipelineError?.message || null;
+  return {
+    isCapturing,
+    audioFlowing,
+    pipelineHealthy,
+    llmHealthy,
+    iaFunctional: pipelineHealthy && llmHealthy && !pipelineError,
+    aiFunctional: pipelineHealthy && llmHealthy && !pipelineError,
+    pipelineError,
+    error: pipelineError,
+    lastPipelineError,
+  };
+}
+
+
+
+// ── Validation pré-lancement des clés API ────────────────────────────────────
+
+function buildConfigFromMessage(config = {}) {
+  return {
+    provider: (config.llmProvider || config.provider || LLM_PROVIDER || 'anthropic').trim(),
+    endpoint: (config.llmEndpoint || config.endpoint || LLM_ENDPOINT || '').trim(),
+    model:    (config.llmModel    || config.model    || LLM_MODEL    || '').trim(),
+    apiKey:   (config.llmApiKey   || config.apiKey   || LLM_API_KEY  || '').trim(),
+    deepgramKey: (config.deepgramKey || DEEPGRAM_KEY || '').trim(),
+  };
+}
+
+function withTimeout(promise, timeoutMs, timeoutMessage) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(timeoutMessage || 'Délai dépassé.')), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function fetchJsonForValidation(url, options, timeoutMs = 9000) {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(url, { ...options, signal: controller?.signal });
+    let data = null;
+    try { data = await res.json(); }
+    catch (_) { data = null; }
+    return { res, data };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function validateAnthropicKey(config) {
+  if (!config.apiKey) {
+    return { ok: false, source: 'llm', message: 'Clé Anthropic absente.' };
+  }
+
+  try {
+    const { res, data } = await fetchJsonForValidation('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': config.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: config.model || DEFAULT_ANTHROPIC_MODEL,
+        max_tokens: 4,
+        temperature: 0,
+        messages: [{ role: 'user', content: 'Reply OK.' }],
+      }),
+    });
+
+    if (!res.ok || data?.error) {
+      const apiMessage = data?.error?.message || data?.error || ('HTTP ' + res.status);
+      return { ok: false, source: 'llm', message: 'Anthropic invalide : ' + apiMessage };
+    }
+    return { ok: true, source: 'llm', message: 'Clé Anthropic valide.' };
+  } catch (err) {
+    const suffix = err?.name === 'AbortError' ? 'délai dépassé' : err.message;
+    return { ok: false, source: 'llm', message: 'Anthropic injoignable : ' + suffix };
+  }
+}
+
+async function validateOpenAICompatibleKey(config) {
+  if (!config.endpoint) {
+    return { ok: false, source: 'llm', message: 'Endpoint LLM absent.' };
+  }
+  if (!config.model) {
+    return { ok: false, source: 'llm', message: 'Modèle LLM absent.' };
+  }
+
+  try {
+    const base = config.endpoint.replace(/\/+$/, '');
+    const headers = { 'Content-Type': 'application/json' };
+    if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
+
+    const { res, data } = await fetchJsonForValidation(base + '/chat/completions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: config.model,
+        max_tokens: 4,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: 'You are a health check endpoint.' },
+          { role: 'user', content: 'Reply OK.' },
+        ],
+      }),
+    });
+
+    if (!res.ok || data?.error) {
+      const apiMessage = typeof data?.error === 'string'
+        ? data.error
+        : (data?.error?.message || ('HTTP ' + res.status));
+      return { ok: false, source: 'llm', message: 'Endpoint LLM invalide : ' + apiMessage };
+    }
+
+    const content = data?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string') {
+      return { ok: false, source: 'llm', message: 'Endpoint LLM joignable, mais réponse inattendue.' };
+    }
+
+    return { ok: true, source: 'llm', message: 'Endpoint LLM valide.' };
+  } catch (err) {
+    const suffix = err?.name === 'AbortError' ? 'délai dépassé' : err.message;
+    return { ok: false, source: 'llm', message: 'Endpoint LLM injoignable : ' + suffix };
+  }
+}
+
+async function validateDeepgramKey(deepgramKey) {
+  if (!deepgramKey) {
+    return { ok: false, source: 'deepgram', message: 'Clé Deepgram absente.' };
+  }
+
+  const deepgramParams = new URLSearchParams({
+    encoding: 'linear16',
+    sample_rate: '16000',
+    channels: '1',
+    model: 'nova-3',
+    language: 'multi',
+  });
+
+  return withTimeout(new Promise((resolve) => {
+    let opened = false;
+    let done = false;
+    let socket = null;
+
+    function finish(result) {
+      if (done) return;
+      done = true;
+      try {
+        if (socket && socket.readyState === WebSocket.OPEN) socket.close(1000, 'validation complete');
+      } catch (_) {}
+      resolve(result);
+    }
+
+    try {
+      socket = new WebSocket(
+        `wss://api.deepgram.com/v1/listen?${deepgramParams.toString()}`,
+        ['token', deepgramKey]
+      );
+
+      socket.onopen = () => {
+        opened = true;
+        finish({ ok: true, source: 'deepgram', message: 'Clé Deepgram valide.' });
+      };
+
+      socket.onerror = () => {
+        finish({ ok: false, source: 'deepgram', message: 'Deepgram injoignable ou clé refusée.' });
+      };
+
+      socket.onclose = (event) => {
+        if (opened || done) return;
+        const reason = event?.reason ? ' — ' + event.reason : '';
+        finish({ ok: false, source: 'deepgram', message: 'Deepgram invalide ou refusé (code ' + event.code + ')' + reason + '.' });
+      };
+    } catch (err) {
+      finish({ ok: false, source: 'deepgram', message: 'Deepgram impossible à tester : ' + err.message });
+    }
+  }), 7000, 'Deepgram : délai de validation dépassé.').catch((err) => ({
+    ok: false,
+    source: 'deepgram',
+    message: err.message,
+  }));
+}
+
+async function validateKeysBeforeStart(configFromPopup = {}) {
+  const config = buildConfigFromMessage(configFromPopup);
+
+  const llmPromise = config.provider === 'openai'
+    ? validateOpenAICompatibleKey(config)
+    : validateAnthropicKey(config);
+  const deepgramPromise = validateDeepgramKey(config.deepgramKey);
+
+  const [llm, deepgram] = await Promise.all([llmPromise, deepgramPromise]);
+  const checks = { llm, deepgram };
+  const errors = [llm, deepgram].filter(r => !r.ok).map(r => r.message);
+  const ok = errors.length === 0;
+
+  if (ok) {
+    return {
+      ok: true,
+      message: 'Clés valides : LLM et Deepgram opérationnels.',
+      checks,
+      checkedAt: Date.now(),
+    };
+  }
+
+  return {
+    ok: false,
+    message: errors.join(' | '),
+    checks,
+    checkedAt: Date.now(),
+  };
+}
+
 async function loadKeys() {
   // browser.storage renvoie une Promise sous Firefox (pas de callback).
   const data = await browserAPI.storage.local.get([
@@ -39,7 +355,34 @@ async function loadKeys() {
   LLM_API_KEY  = (data.llmApiKey || data.anthropicKey || '').trim();
 }
 
-const EVALUATE_PROMPT = ``;
+const EVALUATE_PROMPT = `
+You are a bilingual real-time fact-checking assistant.
+The transcript may be in English, French, or a mix of both.
+Your job is to detect factual claims in either language, evaluate them, and return bilingual claim translations.
+
+Rules:
+- Understand French and English directly.
+- If the claim is in French, keep the original French text in "claim" and provide an English translation in "claim_en".
+- If the claim is in English, keep the original English text in "claim" and provide a French translation in "claim_fr".
+- If the claim mixes French and English, keep the mixed original text in "claim" and provide both "claim_fr" and "claim_en" when useful.
+- Do not translate proper names, organization names, laws, places, or technical terms when that would distort the meaning.
+- Evaluate claims as they were made at the time of the recording when a date is provided.
+- Ignore purely subjective opinions, jokes, filler, greetings, and vague claims that cannot be fact-checked.
+- Return only valid JSON. No Markdown. No code fences. No extra text.
+
+Return a JSON array. Each object must follow this shape:
+{
+  "claim": "original factual claim, in the source language",
+  "claim_fr": "French translation or French original when available",
+  "claim_en": "English translation or English original when available",
+  "verdict": "TRUE | SUBSTANTIALLY TRUE | FALSE | MISLEADING | UNVERIFIABLE",
+  "speaker": "identified speaker name or Unknown",
+  "explanation": "short explanation in the same language as the claim when possible",
+  "confidence": 0.0
+}
+
+If there is no factual claim, return [].
+`;
 
 // ── Speaker parsing (mirrors overlay.js) ─────────────────────────────────────
 
@@ -102,7 +445,7 @@ function stripFences(raw) {
 
 function reportLLMError(msg) {
   console.error('[llm] API error:', msg);
-  if (activeTabId) browserAPI.tabs.sendMessage(activeTabId, { type: 'PIPELINE_ERROR', message: msg }).catch(() => {});
+  notifyPipelineError(msg, 'llm', { fatal: true });
 }
 
 // Point d'entrée unique : route vers Anthropic ou un endpoint compatible OpenAI.
@@ -129,9 +472,27 @@ async function callAnthropic(userMessage, systemPrompt) {
         messages: [{ role: 'user', content: userMessage }],
       }),
     });
-    const data = await res.json();
-    if (data.error) { reportLLMError(data.error.message || 'Unknown API error'); return ''; }
-    return stripFences(data.content?.[0]?.text?.trim() || '');
+    let data = {};
+    try { data = await res.json(); }
+    catch (jsonErr) {
+      reportLLMError('Anthropic : réponse non JSON (HTTP ' + res.status + ').');
+      return '';
+    }
+
+    if (!res.ok || data.error) {
+      const apiMessage = data.error?.message || data.error || ('HTTP ' + res.status);
+      reportLLMError('Anthropic : ' + apiMessage);
+      return '';
+    }
+
+    const content = stripFences(data.content?.[0]?.text?.trim() || '');
+    if (!content) {
+      reportLLMError('Anthropic : réponse vide du modèle.');
+      return '';
+    }
+
+    markLLMSuccess();
+    return content;
   } catch (err) {
     reportLLMError('Anthropic : ' + err.message);
     return '';
@@ -160,12 +521,29 @@ async function callOpenAICompatible(userMessage, systemPrompt) {
         ],
       }),
     });
-    const data = await res.json();
-    if (data.error) {
-      reportLLMError(typeof data.error === 'string' ? data.error : (data.error.message || 'Erreur LLM'));
+    let data = {};
+    try { data = await res.json(); }
+    catch (jsonErr) {
+      reportLLMError('Endpoint LLM : réponse non JSON (HTTP ' + res.status + ').');
       return '';
     }
-    return stripFences(data.choices?.[0]?.message?.content?.trim() || '');
+
+    if (!res.ok || data.error) {
+      const apiMessage = typeof data.error === 'string'
+        ? data.error
+        : (data.error?.message || ('HTTP ' + res.status));
+      reportLLMError('Endpoint LLM : ' + apiMessage);
+      return '';
+    }
+
+    const content = stripFences(data.choices?.[0]?.message?.content?.trim() || '');
+    if (!content) {
+      reportLLMError('Endpoint LLM : réponse vide du modèle.');
+      return '';
+    }
+
+    markLLMSuccess();
+    return content;
   } catch (err) {
     reportLLMError('Endpoint LLM injoignable : ' + err.message);
     return '';
@@ -182,17 +560,70 @@ function parseArray(str) {
 
 // ── Lexical features ──────────────────────────────────────────────────────────
 
-const HEDGING_WORDS   = ['think','believe','maybe','perhaps','probably','might','could','seem','appears','guess','suppose','somewhat'];
-const CERTAINTY_WORDS = ['definitely','certainly','absolutely','always','never','clearly','obviously','undoubtedly','exactly','proven'];
-const FILLER_WORDS    = ['um','uh','like','basically','actually','literally','right','okay'];
-const EMOTIONAL_WORDS = ['disaster','terrible','horrible','amazing','incredible','great','awful','fantastic','disgusting','wonderful','worst','best'];
-const EXCLUSIVE_WORDS = ['but','except','however','although','unless','without','exclude'];
-const FP_SINGULAR     = ['i','me','my','mine','myself'];
+const HEDGING_WORDS = [
+  // English
+  'think','believe','maybe','perhaps','probably','might','could','seem','appears','guess','suppose','somewhat',
+  // Français
+  'pense','crois','croire','peut-être','probablement','possible','pourrait','semblerait','semble','j imagine','je suppose','environ','à peu près'
+];
+const CERTAINTY_WORDS = [
+  // English
+  'definitely','certainly','absolutely','always','never','clearly','obviously','undoubtedly','exactly','proven',
+  // Français
+  'certainement','absolument','toujours','jamais','clairement','évidemment','exactement','prouvé','preuve','forcément','sans aucun doute'
+];
+const FILLER_WORDS = [
+  // English
+  'um','uh','like','basically','actually','literally','right','okay',
+  // Français
+  'euh','heu','bah','ben','genre','en fait','du coup','voilà','quoi','ok','d accord'
+];
+const EMOTIONAL_WORDS = [
+  // English
+  'disaster','terrible','horrible','amazing','incredible','great','awful','fantastic','disgusting','wonderful','worst','best',
+  // Français
+  'catastrophe','terrible','horrible','incroyable','génial','affreux','fantastique','dégoûtant','merveilleux','pire','meilleur'
+];
+const EXCLUSIVE_WORDS = [
+  // English
+  'but','except','however','although','unless','without','exclude',
+  // Français
+  'mais','sauf','cependant','pourtant','bien que','à moins que','sans','exclure'
+];
+const FP_SINGULAR = [
+  // English
+  'i','me','my','mine','myself',
+  // Français
+  'je','moi','mon','ma','mes','mien','mienne','moi-même'
+];
+
+function normalizeForLexical(text) {
+  return (text || '')
+    .toLowerCase()
+    .normalize('NFC')
+    .replace(/[’']/g, ' ')
+    .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 function extractLexical(text) {
-  const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+  const normalized = normalizeForLexical(text);
+  const words = normalized.split(/\s+/).filter(Boolean);
   const total = words.length || 1;
-  const rate  = (list) => Math.round(words.filter(w => list.some(h => w.includes(h))).length / total * 100);
+  const rate = (list) => {
+    let count = 0;
+    for (const marker of list) {
+      const m = normalizeForLexical(marker);
+      if (!m) continue;
+      if (m.includes(' ')) {
+        if ((` ${normalized} `).includes(` ${m} `)) count += 1;
+      } else {
+        count += words.filter(w => w.includes(m)).length;
+      }
+    }
+    return Math.round(count / total * 100);
+  };
   return {
     rates: {
       hedging:       rate(HEDGING_WORDS),
@@ -228,8 +659,12 @@ function buildLexicalSummary(f) {
 const recentClaims   = new Map(); // key → [timestamp, originalClaim]
 const CLAIM_DEDUP_MS = 200000;
 
+function stripAccents(text) {
+  return (text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 function normalizeClaimKey(claim) {
-  return claim.toLowerCase()
+  return stripAccents(claim.toLowerCase())
     .replace(/[^a-z0-9\s]/g, '')
     .split(/\s+/)
     .filter(w => w.length >= 4)
@@ -448,10 +883,18 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
 
     const groundedAll = await Promise.all(fastResults.map(async (fastResult) => {
       try {
-        const urls = await searchWeb(fastResult.claim);
+        const searchQueries = [...new Set([
+          fastResult.claim,
+          fastResult.claim_en,
+          fastResult.claim_fr,
+          fastResult.translation_en,
+          fastResult.translation_fr,
+        ].filter(Boolean))].slice(0, 3);
+        const urlGroups = await Promise.all(searchQueries.map(q => searchWeb(q)));
+        const urls = [...new Set(urlGroups.flat())].slice(0, 5);
         if (!urls.length) return null;
         const raw = await callLLM(
-          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nWeb search results:\n${urls.join('\n')}${lexicalContext}`,
+          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nWeb search results:\n${urls.join('\n')}${lexicalContext}`,
           EVALUATE_PROMPT
         );
         const results = parseArray(raw);
@@ -520,20 +963,26 @@ function connectDeepgram() {
   return new Promise((resolve, reject) => {
     if (!DEEPGRAM_KEY) { reject(new Error('Deepgram key missing')); return; }
 
+    const deepgramParams = new URLSearchParams({
+      encoding: 'linear16',
+      sample_rate: '16000',
+      channels: '1',
+      // Nova-3 + language=multi permet de transcrire français, anglais,
+      // et les passages qui alternent entre les deux langues.
+      model: 'nova-3',
+      language: 'multi',
+      // Aide Deepgram à mieux découper les prises de parole en code-switching.
+      endpointing: '100',
+      punctuate: 'true',
+      interim_results: 'true',
+      utterance_end_ms: '2500',
+      smart_format: 'true',
+      vad_events: 'true',
+      diarize: 'true',
+    });
+
     deepgramSocket = new WebSocket(
-      'wss://api.deepgram.com/v1/listen?' + [
-        'encoding=linear16',
-        'sample_rate=16000',
-        'channels=1',
-        'model=nova-2',
-        'language=en-US',
-        'punctuate=true',
-        'interim_results=true',
-        'utterance_end_ms=2500',
-        'smart_format=true',
-        'vad_events=true',
-        'diarize=true',
-      ].join('&'),
+      `wss://api.deepgram.com/v1/listen?${deepgramParams.toString()}`,
       ['token', DEEPGRAM_KEY]
     );
 
@@ -580,33 +1029,18 @@ function connectDeepgram() {
 
     deepgramSocket.onerror = (err) => {
       console.error('[background] erreur Deepgram:', err);
-      if (activeTabId) {
-        browserAPI.tabs.sendMessage(activeTabId, {
-          type: 'PIPELINE_ERROR',
-          message: 'Erreur de transcription — vérifiez votre clé Deepgram.',
-        }).catch(() => {});
-      }
+      notifyPipelineError('Erreur de transcription — vérifiez votre clé Deepgram.', 'deepgram', { fatal: true });
     };
 
     deepgramSocket.onclose = (e) => {
       console.log('[background] Deepgram fermé:', e.code, e.reason);
       if (e.code === 1008 || e.code === 1011) {
-        if (activeTabId) {
-          browserAPI.tabs.sendMessage(activeTabId, {
-            type: 'PIPELINE_ERROR',
-            message: 'Connexion Deepgram échouée (code ' + e.code + '). Vérifiez votre clé API.',
-          }).catch(() => {});
-        }
+        notifyPipelineError('Connexion Deepgram échouée (code ' + e.code + '). Vérifiez votre clé API.', 'deepgram', { fatal: true });
         return;
       }
       // reconnexion seulement si une session est active ET que l'audio circule encore
       if (isCapturing && audioFlowing) {
-        if (activeTabId) {
-          browserAPI.tabs.sendMessage(activeTabId, {
-            type: 'PIPELINE_ERROR',
-            message: 'Transcription déconnectée — reconnexion...',
-          }).catch(() => {});
-        }
+        notifyPipelineError('Transcription déconnectée — reconnexion...', 'deepgram', { fatal: false });
         setTimeout(() => {
           if (isCapturing && audioFlowing) connectDeepgram().catch(() => {});
         }, 1000);
@@ -638,6 +1072,9 @@ browserAPI.runtime.onStartup.addListener(() => {
   isCapturing = false;
   audioFlowing = false;
   activeTabId = null;
+  pipelineHealthy = true;
+  llmHealthy = true;
+  lastPipelineError = null;
 });
 
 browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -659,9 +1096,7 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       audioFlowing = true;
       if (isCapturing) {
         connectDeepgram().catch((err) => {
-          if (activeTabId) browserAPI.tabs.sendMessage(activeTabId, {
-            type: 'PIPELINE_ERROR', message: 'Deepgram : ' + err.message,
-          }).catch(() => {});
+          notifyPipelineError('Deepgram : ' + err.message, 'deepgram', { fatal: true });
         });
       }
       break;
@@ -678,15 +1113,11 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       audioFlowing = false;
       if (deepgramSocket) { deepgramSocket.close(); deepgramSocket = null; }
       utteranceBuffer = '';
-      if (activeTabId) browserAPI.tabs.sendMessage(activeTabId, {
-        type: 'PIPELINE_ERROR', message: 'Capture audio arrêtée.',
-      }).catch(() => {});
+      sendToActiveTab({ type: 'CAPTURE_ENDED', message: 'Capture audio arrêtée.' });
       break;
 
     case 'CAPTURE_ERROR':
-      if (activeTabId) browserAPI.tabs.sendMessage(activeTabId, {
-        type: 'PIPELINE_ERROR', message: msg.message || 'Erreur de capture audio.',
-      }).catch(() => {});
+      notifyPipelineError(msg.message || 'Erreur de capture audio.', 'capture', { fatal: true });
       break;
 
     case 'SPEAKER_NAMES':
@@ -710,13 +1141,18 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       break;
 
     case 'PIPELINE_ERROR':
-      if (activeTabId) {
-        browserAPI.tabs.sendMessage(activeTabId, { type: 'PIPELINE_ERROR', message: msg.message }).catch(() => {});
-      }
+      if (msg.origin === 'service-worker') break;
+      notifyPipelineError(msg.message || 'Erreur pipeline inconnue.', msg.source || 'pipeline', { fatal: msg.fatal !== false });
       break;
 
+    case 'VALIDATE_KEYS':
+      validateKeysBeforeStart(msg.config || {})
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ ok: false, message: err.message || 'Validation impossible.' }));
+      return true;
+
     case 'GET_STATUS':
-      sendResponse({ isCapturing });
+      sendResponse(buildStatusResponse());
       break;
   }
 });
@@ -741,6 +1177,7 @@ async function startFactCheck() {
   if (!tab) throw new Error('No active tab found.');
   activeTabId = tab.id;
 
+  clearPipelineError('new-session');
   resetWindow();
   recentClaims.clear();
   isCapturing  = true;
@@ -765,6 +1202,7 @@ function stopFactCheck() {
   if (deepgramSocket) { deepgramSocket.close(); deepgramSocket = null; }
   utteranceBuffer = '';
 
+  clearPipelineError('stopped');
   resetWindow();
   recentClaims.clear();
 
