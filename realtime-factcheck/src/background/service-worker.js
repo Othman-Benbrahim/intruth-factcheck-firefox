@@ -16,6 +16,7 @@ let LLM_PROVIDER = 'anthropic';   // 'anthropic' | 'openai'
 let LLM_API_KEY  = '';            // clé du fournisseur actif (peut être vide pour LM Studio local)
 let LLM_ENDPOINT = '';            // base URL compatible OpenAI, ex. http://localhost:1234/v1
 let LLM_MODEL    = '';            // identifiant du modèle
+let LLM_REASONING = false;        // true si modèle "reasoning" (o-series, R1…)
 let DEEPGRAM_KEY = '';
 const SERPER_KEY = '';
 
@@ -47,6 +48,11 @@ const LLM_RETRY_BASE_DELAY_MS = 700;
 // Réglages anti-troncature : on force le LLM à répondre court et on découpe
 // la fenêtre de transcript en mini-lots pour éviter les JSON incomplets.
 const LLM_ANALYSIS_MAX_TOKENS = 1400;
+// Les modèles "reasoning" consomment beaucoup de tokens en réflexion avant de
+// produire leur réponse : budget de sortie nettement plus large pour éviter
+// une réponse vide / tronquée.
+const LLM_REASONING_MAX_TOKENS = 6000;
+const LLM_REASONING_VALIDATION_TOKENS = 2048;
 const LLM_MAX_CLAIMS_PER_BATCH = 1;
 const LLM_BATCH_CHAR_LIMIT = 900;
 const LLM_MAX_BATCHES_PER_WINDOW = 4;
@@ -224,6 +230,7 @@ function buildConfigFromMessage(config = {}) {
     model:    (config.llmModel    || config.model    || LLM_MODEL    || '').trim(),
     apiKey:   (config.llmApiKey   || config.apiKey   || LLM_API_KEY  || '').trim(),
     deepgramKey: (config.deepgramKey || DEEPGRAM_KEY || '').trim(),
+    reasoning: (config.llmReasoning === true || config.reasoning === true),
   };
 }
 
@@ -317,15 +324,13 @@ async function validateOpenAICompatibleKey(config) {
     const { res, data } = await fetchJsonForValidation(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model: config.model,
-        max_tokens: 160,
-        temperature: 0,
-        messages: [
-          { role: 'system', content: 'Return a short plain text answer.' },
-          { role: 'user', content: 'Health check. Reply with OK.' },
-        ],
-      }),
+      body: JSON.stringify(buildOpenAIBody(
+        config.model,
+        'Return a short plain text answer.',
+        'Health check. Reply with OK.',
+        config.reasoning ? LLM_REASONING_VALIDATION_TOKENS : 160,
+        config.reasoning
+      )),
     });
 
     if (!res.ok || data?.error) {
@@ -455,15 +460,25 @@ async function validateKeysBeforeStart(configFromPopup = {}) {
 
 async function loadKeys() {
   // browser.storage renvoie une Promise sous Firefox (pas de callback).
-  const data = await browserAPI.storage.local.get([
-    'deepgramKey', 'llmProvider', 'llmApiKey', 'llmEndpoint', 'llmModel', 'anthropicKey',
+  const local = await browserAPI.storage.local.get([
+    'deepgramKey', 'llmProvider', 'llmApiKey', 'llmEndpoint', 'llmModel', 'llmReasoning', 'anthropicKey',
   ]);
-  DEEPGRAM_KEY = data.deepgramKey || '';
-  LLM_PROVIDER = data.llmProvider || 'anthropic';
-  LLM_ENDPOINT = (data.llmEndpoint || '').trim();
-  LLM_MODEL    = (data.llmModel    || '').trim();
+  // Si la mémorisation est désactivée, les clés sont en storage.session
+  // (mémoire de session, non écrite sur le disque). On lit les deux, la
+  // session étant prioritaire pour les valeurs secrètes.
+  let session = {};
+  try {
+    session = await browserAPI.storage.session.get(['deepgramKey', 'llmApiKey', 'llmEndpoint', 'llmModel']);
+  } catch (_) { session = {}; }
+  const pick = (k) => (session && session[k] !== undefined && session[k] !== '') ? session[k] : local[k];
+
+  DEEPGRAM_KEY  = pick('deepgramKey') || '';
+  LLM_PROVIDER  = local.llmProvider || 'anthropic';
+  LLM_ENDPOINT  = (pick('llmEndpoint') || '').trim();
+  LLM_MODEL     = (pick('llmModel')    || '').trim();
+  LLM_REASONING = local.llmReasoning === true;
   // rétro-compatibilité : si une ancienne clé Anthropic existe, on la réutilise
-  LLM_API_KEY  = (data.llmApiKey || data.anthropicKey || '').trim();
+  LLM_API_KEY   = (pick('llmApiKey') || local.anthropicKey || '').trim();
 }
 
 const EVALUATE_PROMPT = `
@@ -556,7 +571,13 @@ async function searchWeb(query, retries = 2) {
 // ── Claude ────────────────────────────────────────────────────────────────────
 
 function stripFences(raw) {
-  return (raw || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+  let s = (raw || '');
+  // Modèles reasoning : retirer le bloc de réflexion <think>…</think>
+  // (et un éventuel <think> non refermé en cas de troncature), qui précède
+  // souvent le JSON et casserait l'extraction.
+  s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  s = s.replace(/<think>[\s\S]*$/i, '');
+  return s.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
 }
 
 function reportLLMError(msg, options = {}) {
@@ -694,15 +715,11 @@ async function callOpenAICompatible(userMessage, systemPrompt) {
     const res = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model: LLM_MODEL,
-        max_tokens: LLM_ANALYSIS_MAX_TOKENS,
-        temperature: 0,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userMessage },
-        ],
-      }),
+      body: JSON.stringify(buildOpenAIBody(
+        LLM_MODEL, systemPrompt, userMessage,
+        LLM_REASONING ? LLM_REASONING_MAX_TOKENS : LLM_ANALYSIS_MAX_TOKENS,
+        LLM_REASONING
+      )),
     });
 
     const rawText = await res.text();
@@ -767,6 +784,29 @@ function parseJsonMaybe(rawText) {
   if (typeof rawText !== 'string' || !rawText.trim()) return null;
   try { return JSON.parse(rawText); }
   catch (_) { return null; }
+}
+
+// Construit le corps d'une requête /chat/completions, en tenant compte des
+// contraintes des modèles "reasoning" :
+//  - pas de `temperature` (souvent rejetée, seule la valeur par défaut est admise) ;
+//  - budget de sortie via `max_completion_tokens` (et non `max_tokens`, refusé
+//    par les modèles o-series côté OpenAI) ;
+// Les modèles classiques gardent `max_tokens` + `temperature: 0`.
+function buildOpenAIBody(model, systemPrompt, userMessage, maxOut, reasoning) {
+  const body = {
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: userMessage },
+    ],
+  };
+  if (reasoning) {
+    body.max_completion_tokens = maxOut;
+  } else {
+    body.max_tokens = maxOut;
+    body.temperature = 0;
+  }
+  return body;
 }
 
 function buildOpenAIChatCompletionsUrl(endpoint) {
