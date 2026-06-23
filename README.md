@@ -1,122 +1,109 @@
-# intruth
+# InTruth (Édition Firefox)
 
-hi everyone!
+> **Note :** Ceci est un fork adapté pour **Mozilla Firefox** du projet original [InTruth](https://github.com/rpanigrahi222/intruth-factcheck) créé par Risha Panigrahi.
 
-https://chromewebstore.google.com/detail/InTruth/ikmpglbpcdoapfelcbfpoaddmhmaaocg?hl=en&authuser=0
+Bonjour à tous !
 
-built a real-time factchecker called intruth for live debates, speeches, interviews, press conferences, and political events!
+Voici **InTruth**, un vérificateur de faits (*fact-checker*) en temps réel conçu pour les débats diffusés en direct, les discours, les interviews, les conférences de presse et les événements politiques !
 
+<img width="400" height="225" alt="Aperçu d'InTruth" src="https://github.com/user-attachments/assets/a0a8fba9-c28f-473c-866d-84951a9b548e" />
 
-<img width="400" height="225" alt="image" src="https://github.com/user-attachments/assets/a0a8fba9-c28f-473c-866d-84951a9b548e" />
+L'extension écoute l'audio de l'onglet actif, identifie les affirmations factuelles au moment précis où elles sont prononcées, et fournit instantanément un verdict basé sur des preuves grâce à une analyse IA et des recherches sur le Web. La plupart des articles de fact-checking sortent des jours après les débats ; désormais, vous pouvez évaluer la véracité des propos en direct.
 
-it listens to audio from the active browser tab, identifies factual claims as they are made, and provides instant evidence-based verdicts using AI analysis and web research; most fact-checking docs come out days after debates, but now users can evaluate claims as they're made.
+Ceci fait partie d'un projet de recherche plus global, la suite arrive bientôt !
 
-this is part of a bigger research project so more to come!
+## ⚡ Fonctionnalités
 
-## features
+- **Détection d'affirmations en direct :** Surveille en continu la parole sur l'onglet actif et repère les affirmations factuelles nécessitant une vérification en temps réel.
+- **Évaluation de la véracité en direct :** Analyse les propos via des LLM (grands modèles de langage) et des sources externes pour classer la déclaration en :
+  * `VRAI` (*True*)
+  * `SUBSTANTIELLEMENT VRAI` (*Substantially True*)
+  * `FAUX` (*False*)
+  * `TROMPEUR / HORS CONTEXTE` (*Misleading*)
+  * `INVÉRIFIABLE` (*Unverifiable*)
+- **Attribution aux locuteurs :** Suit les différents interlocuteurs tout au long de la discussion et attribue, dans la mesure du possible, chaque affirmation au bon participant.
+- **Analyse du contexte :** Utilise l'historique de la conversation et le contexte de l'événement pour affiner la détection et réduire les faux positifs.
+- **Verdicts en temps réel :** Les vérifications et les sources cliquables s'affichent pendant que l'interview ou le débat est encore en cours.
+- **Bring-Your-Own-Key (BYOK) :** L'utilisateur renseigne sa propre clé d'API Anthropic (aucun frais centralisé).
 
-- live claim detection: continuously monitors speech from the active tab and identifies check-worthy factual claims in real time
+## 🚀 Comment utiliser InTruth
 
-- live claim evaluation: analyzes claim veracity using large language models and external sources to determine whether a statement is:
+1. Ouvrez une vidéo, un live, un débat, une interview ou un discours (ex: YouTube).
+2. Lancez l'extension et assignez les noms des débatteurs en un clic.
+3. L'audio de l'onglet actif est capturé en arrière-plan.
+4. La parole est transcrite instantanément.
+5. Les affirmations factuelles pertinentes sont extraites.
+6. Les déclarations sont confrontées à des sources d'autorité sur le Web.
+7. Les verdicts et leurs explications s'affichent à l'écran !
 
-* TRUE
-* SUBSTANTIALLY TRUE
-* FALSE
-* MISLEADING
-* UNVERIFIABLE
+## 🎯 Qu'est-ce qu'une affirmation "vérifiable" ?
 
-- speaker attribution: tracks speakers throughout a discussion and attributes claims to the correct participant whenever possible
+Dans ce contexte, nous vérifions :
+* Les déclarations factuelles précises
+* Les statistiques et données numériques
+* Les événements historiques
+* Les actions et bilans gouvernementaux
+* Les affirmations scientifiques et médicales
+* Les registres publics et faits documentés
 
-- context analysis: uses surrounding conversation and event context to improve claim identification and reduce false positives
+*Exemples :*
+* « L'inflation a culminé à 9,1 % en 2022. »
+* « Ce projet de loi a été voté au Sénat en 2021. »
+* « Le taux de chômage est actuellement inférieur à 5 %. »
 
-- real-time verdicts: veracity checks and sources appear while the debate or interview is still in progress
+**CE QUE NOUS NE VÉRIFIONS PAS :**
+* Les opinions personnelles
+* Les prédictions ou promesses futures
+* Les questions rhétoriques
+* Les jugements de valeur
+* Les descriptions subjectives
 
-- bring-your-own-key: users provide their own anthropic API key
+*Exemples :*
+* « Cette politique va détruire notre économie. »
+* « J'ai le meilleur programme pour le pays. »
+* « Si mon adversaire gagne, ce sera un désastre. »
 
-## how to use intruth:
+## 🔒 Confidentialité
 
-1. open a video, livestream, debate, interview, or speech.
-2. start the extension, and assign speakers w/ the press of a button
-3. audio from the active tab is captured
-4. speech transcribed 
-5. check-worthy, factual claims are extracted
-6. claims evaluated against authoritative sources
-7. verdicts, explanations are displayed to the user!!!
+* Les utilisateurs fournissent leurs propres identifiants d'API, l'auteur de l'extension n'y a absolument aucun accès.
+* Les fragments de transcription sont envoyés directement au service d'IA configuré par l'utilisateur afin de générer les vérifications.
+* Les clés et les préférences sont stockées **strictement en local** dans votre navigateur.
 
-## what's check-worthy?? 
+## 🔑 Permissions Firefox
 
-check-worthy claims in this context are:
+* `tabCapture` : Capture le flux audio de l'onglet actif (uniquement après que l'utilisateur a explicitement démarré une session).
+* `activeTab` : Permet à l'extension d'interagir avec l'onglet actuellement sélectionné.
+* `scripting` : Permet d'injecter l'interface d'affichage des verdicts (panneau superposé) dans la page Web.
+* `storage` : Sauvegarde vos clés d'API et vos paramètres localement.
 
-* specific factual statements
-* statistics and numerical claims
-* historical events
-* government actions and policies
-* scientific and medical claims
-* public records and documented events
+*(Note d'architecture : Contrairement à Chrome, Firefox n'a pas besoin de la permission `offscreen` pour faire tourner l'audio et les WebSockets en tâche de fond).*
 
-i.e. 
-* "inflation peaked at 9.1% in 2022."
-* "the bill passed the Senate in 2021."
-* "the unemployment rate is currently below 5%."
+## ⚠️ Limites et avertissements
 
-NOT:
-* opinions
-* predictions / future promises
-* rhetorical questions
-* value judgments
-* subjective descriptions
+Le fact-checking est par nature imparfait ! Les verdicts générés peuvent occasionnellement être erronés, incomplets ou basés sur des informations obsolètes. Si vous avez un doute sur un sujet, faites vos propres recherches et consultez les sources primaires. 
 
-i.e.
-* "This policy will destroy the economy."
-* "I have the best plan."
-* "If my opponent wins, disaster will follow."
+**Cette extension est un outil d'assistance et d'information, pas une autorité absolue.**
 
-## privacy details
+---
 
-users provide their own API credentials, i have no access to that
+### 💻 Prérequis
 
-transcript data may be sent directly to the AI service configured by the user in order to generate fact-check results
+* Mozilla Firefox (version récente compatible Manifest V3 / Gecko)
+* Une clé d'API Anthropic (Claude) valide
 
-see privacy policy on web store for complete details!
+### 🛠️ Installation manuelle (Mode Développeur)
 
-## permissions
+1. Clonez ce dépôt : `git clone https://github.com/.../intruth-firefox.git`
+2. Ouvrez Firefox et tapez `about:debugging#/runtime/this-firefox` dans la barre d'adresse.
+3. Cliquez sur le bouton **Charger un module temporaire...** (*Load Temporary Add-on*).
+4. Sélectionnez le fichier `manifest.json` situé dans le dossier du projet.
+5. Cliquez sur l'icône de l'extension dans la barre d'outils Firefox et collez votre clé d'API.
+6. Lancez une vidéo et appuyez sur **Start** !
 
-tabcapture: extracts audio from the active browser tab after the user explicitly starts a fact-checking session.
+## 🤝 Contribution
 
-activetab: allows the extension to interact with the currently selected tab
+Toutes les remarques, idées de fonctionnalités ou retours sur des cas particuliers sont les bienvenus ! Les LLM pouvant parfois se montrer d'une pédanterie excessive, attendez-vous à quelques débats avec l'IA... Ouvrez une *Issue* ou proposez une *Pull Request* !
 
-scripting: injects the fact-checking interface into supported pages.
+## 📄 Licence
 
-storage: stores user preferences and API configuration LOCALLY
-
-offscreen: supports background audio processing and transcription workflows.
-
-## limitations and warnings
-
-fact-checking is inherently imperfect! generated verdicts may occasionally be incorrect, incomplete, or based on outdated information. if you're unsure about something, independently evaluate it and consult original sources when making decisions!
-
-this extension is as an informational tool and NOT a definitive authority !
-
-### requirements
-
-* Chrome Manifest V3
-* User-provided AI API key
-* Modern Chromium-based browser
-
-### recipe
-
-1. clone repo
-2. open Chrome Extensions
-3. enable Developer Mode
-4. load unpacked
-5. choose project dir
-6. configure your anthropic API key
-7. press startttt
-
-## Contributing
-
-would love advice, any features you'd like, and any edge cases you've found! haiku can be overly pedantic so i expect many ....
-
-## license
-
-MIT License
+Licence MIT (voir le fichier `LICENSE`).
