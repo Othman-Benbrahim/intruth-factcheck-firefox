@@ -1,538 +1,194 @@
-# InTruth — Extension Firefox de fact-checking en temps reel
+# InTruth — Extension Firefox de fact-checking en temps réel
 
-**InTruth** est une extension Firefox qui transcrit l'audio d'une video en direct, detecte les affirmations factuelles, puis affiche des verdicts de verification directement sur la page.
+> **Fork Firefox** du projet original [InTruth](https://github.com/rpanigrahi222/intruth-factcheck) (fact-checking en direct), adapté pour Mozilla Firefox et étendu : LLM configurable (cloud **ou** local), support des modèles *reasoning*, et mémorisation des clés.
 
-Elle peut etre utilisee sur des videos, debats, interviews, conferences, lives ou prises de parole politiques.
+**InTruth** écoute l'audio capté par le navigateur, le transcrit en direct, détecte les affirmations factuelles au moment où elles sont prononcées, puis affiche des verdicts de vérification dans un panneau superposé à la page. Utile sur les débats, interviews, conférences de presse, lives et prises de parole.
 
-Cette version fonctionne avec :
-
-- **Deepgram** pour la transcription audio ;
-- un **LLM** pour analyser les phrases et produire des verdicts ;
-- des fournisseurs compatibles **Anthropic** ou **OpenAI-compatible** ;
-- des modeles locaux comme **LM Studio**.
+La plupart des articles de fact-checking paraissent des jours après l'événement. Ici, l'évaluation se fait pendant que la vidéo tourne.
 
 ---
 
-## Ce que fait l'extension
+## ⚡ Fonctionnalités
 
-Quand vous lancez InTruth sur une page video :
-
-1. l'extension capture l'audio de l'onglet ;
-2. Deepgram transforme l'audio en texte ;
-3. le texte est decoupe en petits blocs ;
-4. le LLM cherche des affirmations factuelles ;
-5. l'extension affiche les claims et les verdicts dans un overlay.
-
-Exemple :
-
-```txt
-Phrase entendue :
-La capitale de la France est Paris.
-
-Resultat attendu :
-Claim detecte -> La capitale de la France est Paris.
-Verdict -> TRUE
-```
+- **Détection d'affirmations en direct** — repère en continu les affirmations factuelles vérifiables dans la parole transcrite.
+- **Verdicts en temps réel** — chaque affirmation est classée :
+  - `VRAI`
+  - `SUBSTANTIELLEMENT VRAI`
+  - `FAUX`
+  - `TROMPEUR / HORS CONTEXTE`
+  - `INVÉRIFIABLE`
+- **Transcription multilingue** — Deepgram Nova-3 en mode `language=multi` (français, anglais, etc.).
+- **LLM au choix** — Anthropic (Claude) **ou** n'importe quel fournisseur **compatible OpenAI**, cloud ou local (LM Studio, Ollama…), via un menu de préréglages.
+- **Support des modèles *reasoning*** — une case dédiée adapte la requête aux modèles qui « réfléchissent » (o-series, DeepSeek-R1, etc.).
+- **Attribution aux locuteurs** — suit les intervenants (diarisation Deepgram) et attribue les affirmations.
+- **Mémorisation des clés** — option pour conserver vos clés localement, ou les garder uniquement pour la session en cours.
+- **Export de session** — récapitulatif des verdicts exportable.
+- **Bring-Your-Own-Key (BYOK)** — vous fournissez vos propres clés API ; l'auteur n'y a aucun accès.
 
 ---
 
-## Important : utiliser un modele non-reasoning
+## 🔧 Comment ça marche
 
-Pour fonctionner correctement, InTruth a besoin que le modele renvoie sa reponse finale dans :
-
-```js
-choices[0].message.content
+```
+Popup (réglages) ──► Background (event page Firefox)
+        │
+        ▼
+Clic « Activer la capture audio » dans le panneau (geste utilisateur requis)
+        │
+        ▼
+Content script : getUserMedia → AudioContext 16 kHz → PCM Int16 → fragments audio
+        │  (envoyés au background)
+        ▼
+Background : WebSocket Deepgram → transcription → détection d'affirmations
+        │
+        ▼
+LLM (Anthropic ou compatible OpenAI) [+ recherche web Serper, optionnelle]
+        │
+        ▼
+Verdicts renvoyés au panneau superposé (overlay)
 ```
 
-Certains modeles de type **reasoning**, **thinking** ou **chain-of-thought** renvoient leur raisonnement dans :
-
-```js
-choices[0].message.reasoning
-```
-
-et laissent :
-
-```js
-choices[0].message.content
-```
-
-vide.
-
-Dans ce cas, l'extension recoit bien une reponse du fournisseur, mais elle ne peut pas l'utiliser.
-
-### A retenir
-
-Utilisez un modele **chat**, **instruct** ou **non-reasoning**.
-
-Evitez les modeles qui ne produisent que du raisonnement interne.
-
-Si vous voyez une erreur du type :
-
-```txt
-contenu texte introuvable
-message.content vide
-reasoning rempli
-```
-
-le probleme vient probablement du modele choisi.
+Le background est **agnostique de la source audio** et **du fournisseur LLM** : changer de modèle ne demande aucune modification de code, et la capture est isolée dans le content script.
 
 ---
 
-## Telecharger le projet
+## 🎙️ La capture audio sous Firefox — à lire avant de tester
 
-### Option 1 — Depuis GitHub
+Firefox **n'expose pas** d'API permettant de capter directement le son d'un onglet (`tabCapture` n'est pas implémenté, et `getDisplayMedia` ne renvoie aucune piste audio sous Firefox). InTruth capte donc un **périphérique d'entrée audio** via `getUserMedia`.
 
-Allez sur la page du depot :
+Concrètement, au clic sur **« Activer la capture audio »**, Firefox affiche une fenêtre de permission micro **avec un menu déroulant de périphériques**. Le choix de ce périphérique détermine ce qui est transcrit :
 
-```txt
-https://github.com/Othman-Benbrahim/intruth-factcheck-firefox
-```
+| Objectif | Périphérique à choisir |
+|---|---|
+| **Capter le son de l'onglet proprement** | un périphérique **« Monitor » / loopback** |
+| └ Linux (PulseAudio/PipeWire) | « Monitor of … » (déjà présent, rien à installer) |
+| └ Windows | « Stereo Mix » (à activer) ou un câble virtuel type VB-Audio Cable |
+| └ macOS | un périphérique loopback type BlackHole |
+| Test rapide / dépannage | votre micro réel — capte le son des haut-parleurs **+ le bruit ambiant** (qualité médiocre) |
 
-Puis cliquez sur :
-
-```txt
-Code -> Download ZIP
-```
-
-Decompressez ensuite le fichier ZIP sur votre ordinateur.
-
-### Option 2 — Avec Git
-
-```bash
-git clone https://github.com/Othman-Benbrahim/intruth-factcheck-firefox.git
-```
+> C'est une limite de Firefox, pas de l'extension. Le son de la vidéo continue de jouer normalement pendant la capture.
 
 ---
 
-## Installer l'extension dans Firefox en local
+## 🤖 Modèles LLM pris en charge
 
-L'extension se charge manuellement en mode developpement.
+InTruth fonctionne avec **Anthropic** nativement, et avec **tout fournisseur exposant l'API `/chat/completions`** (standard OpenAI). Dans le popup, choisissez le fournisseur dans le menu **« Fournisseur (préréglage) »** : l'endpoint se remplit automatiquement. Vous renseignez ensuite le **modèle** et la **clé**.
 
-1. Ouvrez Firefox.
-2. Dans la barre d'adresse, entrez :
+| Préréglage | Endpoint (URL de base) |
+|---|---|
+| OpenRouter (290+ modèles, 1 clé) | `https://openrouter.ai/api/v1` |
+| OpenAI | `https://api.openai.com/v1` |
+| Groq | `https://api.groq.com/openai/v1` |
+| Mistral | `https://api.mistral.ai/v1` |
+| DeepSeek | `https://api.deepseek.com` |
+| xAI (Grok) | `https://api.x.ai/v1` |
+| Together AI | `https://api.together.xyz/v1` |
+| Fireworks AI | `https://api.fireworks.ai/inference/v1` |
+| Perplexity | `https://api.perplexity.ai` |
+| LM Studio (local) | `http://localhost:1234/v1` |
+| Ollama (local) | `http://localhost:11434/v1` |
+| Personnalisé | (saisie manuelle de l'URL) |
 
-```txt
-about:debugging#/runtime/this-firefox
-```
+**Modèles *reasoning*.** Si votre modèle « réfléchit » avant de répondre (o-series, DeepSeek-R1, etc.), cochez **« Modèle reasoning »**. InTruth omet alors la `temperature`, utilise `max_completion_tokens` avec un budget élargi, et retire le bloc de réflexion `<think>…</think>` de la réponse avant l'analyse.
 
-3. Cliquez sur :
+**Modèles locaux.** Les préréglages LM Studio et Ollama pointent vers `localhost` (déjà autorisé). Activez le serveur dans LM Studio (onglet *Developer/Server*) ou lancez Ollama, puis renseignez l'identifiant du modèle chargé. La clé API peut rester vide en local.
 
-```txt
-Load Temporary Add-on
-```
-
-ou en francais :
-
-```txt
-Charger un module complementaire temporaire
-```
-
-4. Selectionnez le fichier :
-
-```txt
-realtime-factcheck/manifest.json
-```
-
-5. L'extension InTruth apparait dans Firefox.
-
-Attention : comme c'est un chargement temporaire, l'extension peut disparaitre apres fermeture complete de Firefox. Il faudra alors la recharger depuis `about:debugging`.
+**Autre fournisseur ?** Ajoutez son domaine dans `host_permissions` du `manifest.json` (sinon le `fetch` est bloqué par le CORS) et, si vous voulez, une `<option>` avec son `data-url` dans le popup.
 
 ---
 
-## Configuration des cles API
+## 🔑 Clés API et mémorisation
 
-Ouvrez l'extension depuis l'icone Firefox.
+InTruth a besoin de **deux clés** :
 
-Vous devez renseigner :
+1. **Clé LLM** — votre clé Anthropic, ou celle de votre fournisseur compatible OpenAI (facultative pour un modèle purement local comme LM Studio).
+2. **Clé Deepgram** — pour la transcription audio.
 
-### 1. Cle Deepgram
+> Une recherche web (Serper) peut renforcer les verdicts. La clé Serper se règle dans le code (`SERPER_KEY` dans le service worker) ; sans elle, les verdicts reposent sur les seules connaissances du modèle.
 
-Elle sert a transcrire l'audio.
+**Mémorisation.** La case **« Se souvenir de mes clés sur ce navigateur »** (cochée par défaut) contrôle le stockage :
 
-Champ :
+- **cochée** → clés enregistrées dans `storage.local` (persistant) ;
+- **décochée** → clés gardées uniquement pour la session courante (`storage.session`), jamais écrites sur le disque.
 
-```txt
-Deepgram API Key
-```
-
-La transcription actuelle est prevue pour fonctionner en francais et en anglais.
-
-### 2. Fournisseur LLM
-
-Vous pouvez choisir :
-
-```txt
-Anthropic
-```
-
-ou :
-
-```txt
-Compatible OpenAI / LM Studio
-```
-
-Utilisez **Compatible OpenAI / LM Studio** pour :
-
-- LM Studio en local ;
-- un autre endpoint compatible OpenAI ;
-- un serveur local compatible `/chat/completions`.
-
-### 3. Endpoint LLM
-
-Pour LM Studio en local, l'endpoint ressemble souvent a :
-
-```txt
-http://localhost:1234/v1
-```
-
-ou :
-
-```txt
-http://127.0.0.1:1234/v1
-```
-
-Pour OpenAI officiel, l'endpoint est generalement :
-
-```txt
-https://api.openai.com/v1
-```
-
-### 4. Modele LLM
-
-Indiquez le nom du modele utilise.
-
-Choisissez un modele qui repond directement en JSON dans `message.content`.
+> ⚠️ **Persistance et module temporaire.** Pour un module chargé via `about:debugging` (temporaire), Firefox **efface le stockage local au redémarrage du navigateur** — vos clés disparaissent alors même si la case est cochée. Deux solutions :
+> 1. **En dev** — dans `about:config`, passez `extensions.webextensions.keepStorageOnUninstall` **et** `extensions.webextensions.keepUuidOnUninstall` à `true`.
+> 2. **En usage réel** — installez une version empaquetée/signée : le stockage persiste alors normalement.
 
 ---
 
-## Permissions dans manifest.json
+## 🚀 Utilisation
 
-Si vous utilisez un fournisseur cloud, Firefox doit avoir le droit d'appeler son domaine.
-
-Dans `manifest.json`, ajoutez le domaine dans `host_permissions`.
-
-Exemple pour Deepgram :
-
-```json
-"https://api.deepgram.com/*"
-```
-
-Exemple pour OpenAI :
-
-```json
-"https://api.openai.com/*"
-```
-
-Exemple pour Anthropic :
-
-```json
-"https://api.anthropic.com/*"
-```
-
-Exemple de configuration :
-
-```json
-"host_permissions": [
-  "https://api.anthropic.com/*",
-  "https://api.openai.com/*",
-  "https://google.serper.dev/*",
-  "https://api.deepgram.com/*",
-  "https://fonts.googleapis.com/*",
-  "https://fonts.gstatic.com/*",
-  "http://localhost/*",
-  "http://127.0.0.1/*"
-]
-```
-
-Apres modification du `manifest.json`, rechargez l'extension depuis :
-
-```txt
-about:debugging#/runtime/this-firefox
-```
+1. Ouvrez une vidéo / un live / un débat (ex. YouTube).
+2. Cliquez sur l'icône InTruth, choisissez le fournisseur, renseignez le modèle et les clés (LLM + Deepgram).
+3. Cliquez sur **Start Fact-Checking** — le panneau apparaît sur la page.
+4. Dans le panneau, cliquez **« Activer la capture audio »** et **sélectionnez votre périphérique Monitor/loopback** dans la fenêtre Firefox.
+5. Les transcriptions, affirmations et verdicts s'affichent en direct.
 
 ---
 
-## Utiliser l'extension
+## 🎯 Qu'est-ce qu'une affirmation « vérifiable » ?
 
-1. Ouvrez une video compatible.
-2. Cliquez sur l'icone InTruth.
-3. Entrez vos cles API.
-4. Verifiez que le fournisseur LLM est bien configure.
-5. Cliquez sur :
+**Vérifié :** déclarations factuelles précises, statistiques et données chiffrées, événements historiques, bilans et actions gouvernementaux, affirmations scientifiques ou médicales, faits documentés.
 
-```txt
-Start Fact-Checking
-```
+*Exemples :* « L'inflation a culminé à 9,1 % en 2022. » · « Ce projet de loi a été voté au Sénat en 2021. » · « Le taux de chômage est inférieur à 5 %. »
 
-6. Lancez la video.
-7. L'overlay apparait sur la page.
-8. Les transcriptions, claims et verdicts s'affichent progressivement.
+**Non vérifié :** opinions, prédictions et promesses, questions rhétoriques, jugements de valeur, descriptions subjectives.
+
+*Exemples :* « Cette politique va détruire l'économie. » · « J'ai le meilleur programme. » · « Si mon adversaire gagne, ce sera un désastre. »
 
 ---
 
-## Tester rapidement si tout fonctionne
+## 🔒 Permissions Firefox
 
-Avant de tester sur une vraie video politique, utilisez une phrase simple.
+- `activeTab` — interagir avec l'onglet actif au lancement.
+- `scripting` — injecter le panneau de verdicts.
+- `storage` — sauvegarder vos clés et préférences localement.
+- `host_permissions` — joindre les API utilisées : Anthropic, les fournisseurs compatibles OpenAI pré-autorisés (OpenRouter, Groq, Mistral, DeepSeek, xAI, Together, Fireworks, Perplexity), OpenAI, Deepgram, Serper, polices Google, et `localhost`/`127.0.0.1` (modèles locaux).
+- **Micro** — l'autorisation d'accès à l'entrée audio est demandée *à l'exécution*, lors du clic sur « Activer la capture audio ».
 
-Par exemple, lancez une video ou un audio contenant :
-
-```txt
-La capitale de la France est Paris.
-```
-
-Resultat attendu :
-
-```txt
-Transcription visible
-Claim detecte
-Verdict affiche
-```
-
-Si la transcription s'affiche mais pas le verdict, le probleme vient probablement du LLM, du modele choisi ou du format JSON renvoye.
+*(Firefox n'a pas besoin de la permission `offscreen` ni de `tabCapture` : la capture passe par `getUserMedia` et le WebSocket tourne dans le background.)*
 
 ---
 
-## Comprendre les erreurs frequentes
+## 🔐 Confidentialité
 
-### La transcription fonctionne, mais aucun verdict n'apparait
-
-Cela veut dire que Deepgram fonctionne.
-
-Le probleme se situe probablement ici :
-
-```txt
-LLM
-modele choisi
-reponse JSON
-endpoint
-cle API
-```
-
-Verifiez que le modele n'est pas un modele reasoning-only.
-
-### Erreur : reponse vide du LLM
-
-Le fournisseur repond peut-etre, mais le modele ne renvoie rien dans `message.content`.
-
-Essayez un autre modele non-reasoning.
-
-### Erreur : JSON invalide
-
-Le modele repond, mais pas dans le bon format.
-
-Essayez :
-
-- un modele plus simple ;
-- un modele instruct/chat ;
-- un transcript plus court ;
-- un modele connu pour respecter les consignes JSON.
-
-### Erreur : contenu texte introuvable
-
-Cela arrive souvent quand la reponse ressemble a :
-
-```json
-{
-  "message": {
-    "content": "",
-    "reasoning": "..."
-  }
-}
-```
-
-Dans ce cas, changez de modele.
-
-### Endpoint incorrect
-
-Pour un endpoint OpenAI-compatible, utilisez generalement une base URL :
-
-```txt
-https://fournisseur.com/api/v1
-```
-
-et non :
-
-```txt
-https://fournisseur.com/api/v1/chat/completions
-```
-
-si le service-worker ajoute deja `/chat/completions`.
+- Vous fournissez vos propres identifiants d'API ; l'auteur de l'extension n'y a aucun accès.
+- Les fragments de transcription sont envoyés directement aux services que **vous** configurez (Deepgram pour la transcription, votre LLM pour l'analyse).
+- Les clés et préférences sont stockées **localement** dans votre navigateur (ou en mémoire de session si la mémorisation est désactivée).
 
 ---
 
-## Utilisation avec LM Studio en local
+## ⚠️ Limites et avertissements
 
-1. Ouvrez LM Studio.
-2. Chargez un modele chat/instruct.
-3. Lancez le serveur local.
-4. Dans InTruth, choisissez :
+Le fact-checking automatique est imparfait. Les verdicts peuvent être erronés, incomplets ou basés sur des informations datées. En cas de doute, faites vos propres recherches et consultez les sources primaires.
 
-```txt
-Compatible OpenAI / LM Studio
-```
+- Les **modèles *reasoning*** sont plus lents : une carte de verdict « en attente » expire au bout de 90 s dans le panneau — un modèle local trop lent peut dépasser ce délai.
+- La **qualité de la capture audio** dépend du périphérique choisi (voir la section dédiée).
 
-5. Mettez comme endpoint :
-
-```txt
-http://localhost:1234/v1
-```
-
-6. Entrez le nom du modele charge.
-7. Lancez InTruth.
-
-Si rien ne se passe, verifiez que le serveur LM Studio est bien actif.
+**Cette extension est un outil d'assistance, pas une autorité.**
 
 ---
 
-## Mode debugging Firefox
+## 💻 Prérequis & installation (mode développeur)
 
-Pour comprendre un probleme, utilisez les outils de debug Firefox.
+- Mozilla Firefox **140+** (desktop) ou **142+** (Android).
+- Une clé Deepgram, et une clé LLM (Anthropic ou fournisseur compatible OpenAI) — sauf modèle 100 % local.
 
-### Ouvrir le debug de l'extension
+1. Clonez ce dépôt.
+2. Dans Firefox, ouvrez `about:debugging#/runtime/this-firefox`.
+3. **Charger un module temporaire…** → sélectionnez le `manifest.json` du dossier `realtime-factcheck/`.
+4. Ouvrez une vidéo, cliquez sur l'icône de l'extension, renseignez vos clés, puis **Start**.
 
-1. Allez sur :
-
-```txt
-about:debugging#/runtime/this-firefox
-```
-
-2. Trouvez InTruth.
-3. Cliquez sur :
-
-```txt
-Inspect
-```
-
-ou :
-
-```txt
-Inspecter
-```
-
-4. Ouvrez la console.
-
-Vous pourrez voir les erreurs du service-worker :
-
-```txt
-erreur LLM
-reponse vide
-JSON invalide
-endpoint inaccessible
-cle invalide
-```
-
-### Recharger l'extension
-
-Apres chaque modification de fichier :
-
-1. retournez dans `about:debugging` ;
-2. cliquez sur `Reload` ou `Recharger` ;
-3. rechargez aussi la page video ;
-4. relancez l'extension.
+> Après chaque modification des fichiers, cliquez sur **Recharger** dans `about:debugging` pour reprendre en compte le nouveau code/manifeste.
 
 ---
 
-## Structure du projet
+## 🤝 Contribution
 
-```txt
-realtime-factcheck/
-├── manifest.json
-├── src/
-│   ├── background/
-│   │   └── service-worker.js
-│   ├── content/
-│   │   ├── overlay.js
-│   │   ├── capture.js
-│   │   ├── lexical-features.js
-│   │   └── session-export.js
-│   └── popup/
-│       ├── popup.html
-│       ├── popup.css
-│       └── popup.js
-└── assets/
-```
+Remarques, idées et retours sur des cas particuliers bienvenus — ouvrez une *Issue* ou une *Pull Request*.
 
-### Fichiers importants
+## 📄 Licence
 
-```txt
-manifest.json
-```
-
-Declare les permissions Firefox et les domaines autorises.
-
-```txt
-service-worker.js
-```
-
-Gere Deepgram, le LLM, les claims, les verdicts et les erreurs.
-
-```txt
-overlay.js
-```
-
-Affiche l'interface sur la page video.
-
-```txt
-popup.js
-```
-
-Gere la popup, les cles API et le bouton de lancement.
-
----
-
-## Confidentialite
-
-Les cles API sont stockees localement dans Firefox.
-
-L'audio est envoye a Deepgram pour transcription.
-
-Le texte transcrit est envoye au fournisseur LLM configure par l'utilisateur.
-
-Si la recherche web est activee, certaines affirmations peuvent etre envoyees a un moteur de recherche ou a une API de recherche.
-
-Pour plus de details, consultez le fichier :
-
-```txt
-PRIVACY.md
-```
-
----
-
-## Limites
-
-InTruth est un outil experimental.
-
-Il peut :
-
-- manquer des affirmations ;
-- mal interpreter une phrase ;
-- produire un verdict incomplet ;
-- dependre fortement de la qualite de transcription ;
-- echouer si le modele ne respecte pas le format JSON ;
-- afficher `UNVERIFIABLE` quand le contexte manque.
-
-L'extension aide a analyser un discours, mais ne remplace pas une verification humaine.
-
----
-
-## Resume rapide
-
-Pour que l'extension fonctionne :
-
-```txt
-1. Charger manifest.json dans Firefox via about:debugging
-2. Ajouter les domaines cloud dans host_permissions
-3. Entrer une cle Deepgram valide
-4. Entrer une cle LLM valide
-5. Utiliser un modele non-reasoning
-6. Verifier que le modele ecrit dans message.content
-7. Tester avec une phrase simple
-8. Lancer le fact-checking
-```
-
----
-
-## Licence
-
-MIT License.
+Licence MIT (voir le fichier `LICENSE`).
 
