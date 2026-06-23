@@ -134,15 +134,36 @@ function showSpeakerBanner(speakerId, sample) {
 
   const banner = document.createElement('div');
   banner.className = 'rtfc-speaker-banner';
-  banner.innerHTML =
-    '<div class="rtfc-speaker-banner-text">New speaker detected — who is this?</div>' +
-    '<div class="rtfc-speaker-banner-sample">"' + escapeHtml(sample) + '..."</div>' +
-    '<div class="rtfc-speaker-banner-buttons">' +
-      speakers.map(name =>
-        '<button class="rtfc-speaker-banner-btn" data-name="' + escapeHtml(name) + '" data-id="' + speakerId + '">' + escapeHtml(name) + '</button>'
-      ).join('') +
-      '<button class="rtfc-speaker-banner-btn rtfc-speaker-banner-btn--skip" data-id="' + speakerId + '">Skip</button>' +
-    '</div>';
+
+  const textEl = document.createElement('div');
+  textEl.className = 'rtfc-speaker-banner-text';
+  textEl.textContent = 'New speaker detected — who is this?';
+  banner.appendChild(textEl);
+
+  const sampleEl = document.createElement('div');
+  sampleEl.className = 'rtfc-speaker-banner-sample';
+  sampleEl.textContent = '"' + String(sample || '') + '..."';
+  banner.appendChild(sampleEl);
+
+  const buttonsEl = document.createElement('div');
+  buttonsEl.className = 'rtfc-speaker-banner-buttons';
+
+  speakers.forEach(name => {
+    const btn = document.createElement('button');
+    btn.className = 'rtfc-speaker-banner-btn';
+    btn.dataset.name = name;
+    btn.dataset.id = String(speakerId);
+    btn.textContent = name;
+    buttonsEl.appendChild(btn);
+  });
+
+  const skipBtn = document.createElement('button');
+  skipBtn.className = 'rtfc-speaker-banner-btn rtfc-speaker-banner-btn--skip';
+  skipBtn.dataset.id = String(speakerId);
+  skipBtn.textContent = 'Skip';
+  buttonsEl.appendChild(skipBtn);
+
+  banner.appendChild(buttonsEl);
 
   banner.querySelectorAll('.rtfc-speaker-banner-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -217,12 +238,26 @@ function renderSpeakerEditor() {
   const el = panel?.querySelector('#rtfc-speaker-editor');
   if (!el || !speakers.length) return;
 
-  el.innerHTML = speakers.map((name, i) => {
+  el.replaceChildren();
+
+  speakers.forEach((name, i) => {
     const color = getSpeakerColor(name);
-    return '<span class="rtfc-speaker-chip" style="border-color:' + color + ';color:' + color + '" data-idx="' + i + '">' +
-      '<input class="rtfc-speaker-chip-input" value="' + escapeHtml(name) + '" data-idx="' + i + '" style="color:' + color + '" />' +
-    '</span>';
-  }).join('');
+
+    const chip = document.createElement('span');
+    chip.className = 'rtfc-speaker-chip';
+    chip.dataset.idx = String(i);
+    chip.style.borderColor = color;
+    chip.style.color = color;
+
+    const input = document.createElement('input');
+    input.className = 'rtfc-speaker-chip-input';
+    input.value = name;
+    input.dataset.idx = String(i);
+    input.style.color = color;
+
+    chip.appendChild(input);
+    el.appendChild(chip);
+  });
 
   el.querySelectorAll('.rtfc-speaker-chip-input').forEach(input => {
     input.addEventListener('change', (e) => {
@@ -242,18 +277,9 @@ function renderSpeakerEditor() {
       e.target.closest('.rtfc-speaker-chip').style.borderColor = getSpeakerColor(newName);
       e.target.closest('.rtfc-speaker-chip').style.color = getSpeakerColor(newName);
       sendSpeakerMap(); // update service worker with new names
-
-      // re-render all verdict cards to update speaker tags
-      const cards = verdictListEl?.querySelectorAll('.rtfc-speaker-tag');
-      if (cards) {
-        cards.forEach(tag => {
-          if (tag.textContent === oldName) {
-            tag.textContent = newName;
-            tag.style.background = getSpeakerColor(newName);
-          }
-        });
-      }
+      retryTagAllCards();
     });
+
     // select all on focus for easy editing
     input.addEventListener('focus', e => e.target.select());
   });
@@ -298,12 +324,24 @@ function showError(message, opts) {
 
   const toast = document.createElement('div');
   toast.className = 'rtfc-error-toast';
-  toast.innerHTML =
-    '<span class="rtfc-error-icon">⚠</span>' +
-    '<span class="rtfc-error-msg">' + escapeHtml(normalized) + '</span>' +
-    '<button class="rtfc-error-close">✕</button>';
 
-  toast.querySelector('.rtfc-error-close').addEventListener('click', () => toast.remove());
+  const icon = document.createElement('span');
+  icon.className = 'rtfc-error-icon';
+  icon.textContent = '⚠';
+  toast.appendChild(icon);
+
+  const msgEl = document.createElement('span');
+  msgEl.className = 'rtfc-error-msg';
+  msgEl.textContent = normalized;
+  toast.appendChild(msgEl);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'rtfc-error-close';
+  closeBtn.type = 'button';
+  closeBtn.textContent = '✕';
+  closeBtn.addEventListener('click', () => toast.remove());
+  toast.appendChild(closeBtn);
+
   panel.querySelector('#rtfc-header').insertAdjacentElement('afterend', toast);
 
   // auto-dismiss after 8 seconds unless it looks like a fatal configuration/API error
@@ -317,41 +355,116 @@ function createPanel() {
 
   panel = document.createElement('div');
   panel.id = 'rtfc-panel';
-  panel.innerHTML = [
-    '<div id="rtfc-header">',
-      '<span><span class="rtfc-dot"></span>InTruth</span>',
-      '<div class="rtfc-header-actions">',
-        '<button id="rtfc-export" title="Export session as PDF">↓ Export</button>',
-        '<button id="rtfc-close">✕</button>',
-      '</div>',
-    '</div>',
-    '<div id="rtfc-body">',
-      '<div id="rtfc-transcript-section">',
-        '<div class="rtfc-section-header">',
-          '<span class="rtfc-section-label">Transcript</span>',
-          '<button class="rtfc-toggle-btn" id="rtfc-transcript-toggle">▾</button>',
-        '</div>',
-        '<div id="rtfc-transcript-feed"></div>',
-        '<p id="rtfc-interim"></p>',
-      '</div>',
-      '<div id="rtfc-claims-section">',
-        '<div class="rtfc-section-header">',
-          '<span class="rtfc-section-label">Claims</span>',
-        '</div>',
-        '<ul id="rtfc-claim-feed"></ul>',
-      '</div>',
-      '<div id="rtfc-verdicts-section">',
-        '<div class="rtfc-section-header">',
-          '<span class="rtfc-section-label">Verdicts</span>',
-          '<div id="rtfc-speaker-editor"></div>',
-        '</div>',
-        '<div id="rtfc-verdicts">',
-          '<p class="rtfc-empty">Verdicts will appear here...</p>',
-        '</div>',
-      '</div>',
-    '</div>',
-  ].join('');
 
+  const header = document.createElement('div');
+  header.id = 'rtfc-header';
+
+  const title = document.createElement('span');
+  const dot = document.createElement('span');
+  dot.className = 'rtfc-dot';
+  title.appendChild(dot);
+  title.appendChild(document.createTextNode('InTruth'));
+  header.appendChild(title);
+
+  const headerActions = document.createElement('div');
+  headerActions.className = 'rtfc-header-actions';
+
+  const exportBtn = document.createElement('button');
+  exportBtn.id = 'rtfc-export';
+  exportBtn.type = 'button';
+  exportBtn.title = 'Export session as PDF';
+  exportBtn.textContent = '↓ Export';
+  headerActions.appendChild(exportBtn);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.id = 'rtfc-close';
+  closeBtn.type = 'button';
+  closeBtn.textContent = '✕';
+  headerActions.appendChild(closeBtn);
+
+  header.appendChild(headerActions);
+  panel.appendChild(header);
+
+  const body = document.createElement('div');
+  body.id = 'rtfc-body';
+
+  const transcriptSection = document.createElement('div');
+  transcriptSection.id = 'rtfc-transcript-section';
+
+  const transcriptHeader = document.createElement('div');
+  transcriptHeader.className = 'rtfc-section-header';
+
+  const transcriptLabel = document.createElement('span');
+  transcriptLabel.className = 'rtfc-section-label';
+  transcriptLabel.textContent = 'Transcript';
+  transcriptHeader.appendChild(transcriptLabel);
+
+  const transcriptToggle = document.createElement('button');
+  transcriptToggle.className = 'rtfc-toggle-btn';
+  transcriptToggle.id = 'rtfc-transcript-toggle';
+  transcriptToggle.type = 'button';
+  transcriptToggle.textContent = '▾';
+  transcriptHeader.appendChild(transcriptToggle);
+
+  transcriptSection.appendChild(transcriptHeader);
+
+  const transcriptFeed = document.createElement('div');
+  transcriptFeed.id = 'rtfc-transcript-feed';
+  transcriptSection.appendChild(transcriptFeed);
+
+  const interim = document.createElement('p');
+  interim.id = 'rtfc-interim';
+  transcriptSection.appendChild(interim);
+
+  body.appendChild(transcriptSection);
+
+  const claimsSection = document.createElement('div');
+  claimsSection.id = 'rtfc-claims-section';
+
+  const claimsHeader = document.createElement('div');
+  claimsHeader.className = 'rtfc-section-header';
+
+  const claimsLabel = document.createElement('span');
+  claimsLabel.className = 'rtfc-section-label';
+  claimsLabel.textContent = 'Claims';
+  claimsHeader.appendChild(claimsLabel);
+  claimsSection.appendChild(claimsHeader);
+
+  const claimFeed = document.createElement('ul');
+  claimFeed.id = 'rtfc-claim-feed';
+  claimsSection.appendChild(claimFeed);
+
+  body.appendChild(claimsSection);
+
+  const verdictsSection = document.createElement('div');
+  verdictsSection.id = 'rtfc-verdicts-section';
+
+  const verdictsHeader = document.createElement('div');
+  verdictsHeader.className = 'rtfc-section-header';
+
+  const verdictsLabel = document.createElement('span');
+  verdictsLabel.className = 'rtfc-section-label';
+  verdictsLabel.textContent = 'Verdicts';
+  verdictsHeader.appendChild(verdictsLabel);
+
+  const speakerEditor = document.createElement('div');
+  speakerEditor.id = 'rtfc-speaker-editor';
+  verdictsHeader.appendChild(speakerEditor);
+
+  verdictsSection.appendChild(verdictsHeader);
+
+  const verdicts = document.createElement('div');
+  verdicts.id = 'rtfc-verdicts';
+
+  const empty = document.createElement('p');
+  empty.className = 'rtfc-empty';
+  empty.textContent = 'Verdicts will appear here...';
+  verdicts.appendChild(empty);
+
+  verdictsSection.appendChild(verdicts);
+  body.appendChild(verdictsSection);
+
+  panel.appendChild(body);
   document.body.appendChild(panel);
 
   transcriptFeedEl = panel.querySelector('#rtfc-transcript-feed');
@@ -458,27 +571,41 @@ function colorForVerdict(verdict, confidence) {
   return 'grey';
 }
 
-function buildLexicalRows(lexical) {
-  if (!lexical) return '';
-  const rows = [];
+function appendConvictionRow(fragment, label, text) {
+  const row = document.createElement('div');
+  row.className = 'rtfc-conviction-row';
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'rtfc-conviction-label';
+  labelEl.textContent = label;
+  row.appendChild(labelEl);
+  row.appendChild(document.createTextNode(' ' + text));
+
+  fragment.appendChild(row);
+}
+
+function buildLexicalRowsFragment(lexical) {
+  const fragment = document.createDocumentFragment();
+  if (!lexical) return fragment;
+
   const r = lexical.rates || {};
   if (r.hedging > 0)
-    rows.push('<div class="rtfc-conviction-row"><span class="rtfc-conviction-label">Hedging language:</span> ' + r.hedging + '% rate — e.g. "I think", "maybe", "probably"</div>');
+    appendConvictionRow(fragment, 'Hedging language:', r.hedging + '% rate — e.g. "I think", "maybe", "probably"');
   if (r.certainty > 0)
-    rows.push('<div class="rtfc-conviction-row"><span class="rtfc-conviction-label">Certainty markers:</span> ' + r.certainty + '% rate — e.g. "definitely", "always"</div>');
+    appendConvictionRow(fragment, 'Certainty markers:', r.certainty + '% rate — e.g. "definitely", "always"');
   if (r.filler > 0)
-    rows.push('<div class="rtfc-conviction-row"><span class="rtfc-conviction-label">Filler words:</span> ' + r.filler + '% rate — e.g. "um", "like", "you know"</div>');
+    appendConvictionRow(fragment, 'Filler words:', r.filler + '% rate — e.g. "um", "like", "you know"');
   if (r.emotional > 0)
-    rows.push('<div class="rtfc-conviction-row"><span class="rtfc-conviction-label">Emotional language:</span> ' + r.emotional + '% rate</div>');
+    appendConvictionRow(fragment, 'Emotional language:', r.emotional + '% rate');
   if (r.exclusive > 0)
-    rows.push('<div class="rtfc-conviction-row"><span class="rtfc-conviction-label">Qualifying words:</span> ' + r.exclusive + '% rate — e.g. "but", "except"</div>');
+    appendConvictionRow(fragment, 'Qualifying words:', r.exclusive + '% rate — e.g. "but", "except"');
   if (r.firstPersonSg > 0)
-    rows.push('<div class="rtfc-conviction-row"><span class="rtfc-conviction-label">First-person singular:</span> ' + r.firstPersonSg + '% rate</div>');
+    appendConvictionRow(fragment, 'First-person singular:', r.firstPersonSg + '% rate');
   if (lexical.wordsPerSecond != null) {
     const rateDesc = lexical.wordsPerSecond > 3.5 ? 'fast' : lexical.wordsPerSecond < 2 ? 'slow' : 'moderate';
-    rows.push('<div class="rtfc-conviction-row"><span class="rtfc-conviction-label">Speech rate:</span> ' + lexical.wordsPerSecond + ' w/s (' + rateDesc + ')</div>');
+    appendConvictionRow(fragment, 'Speech rate:', lexical.wordsPerSecond + ' w/s (' + rateDesc + ')');
   }
-  return rows.join('');
+  return fragment;
 }
 
 function buildCard(result) {
@@ -489,24 +616,14 @@ function buildCard(result) {
 
   const card = document.createElement('div');
   card.className = 'rtfc-verdict rtfc-verdict--' + color + (result.pending ? ' rtfc-verdict--pending' : '');
-  card.dataset.claim = result.claim.toLowerCase().slice(0, 40);
+  card.dataset.claim = String(result.claim || '').toLowerCase().slice(0, 40);
   if (result.dominantSpeakerId !== null && result.dominantSpeakerId !== undefined) {
     card.dataset.speakerid = String(result.dominantSpeakerId);
   }
   card._resultData = result;
 
-  const sourcesHTML = (result.sources ?? []).map((url, i) => {
-    const isUrl = url.startsWith('http://') || url.startsWith('https://');
-    return isUrl
-      ? '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener">Source ' + (i + 1) + '</a>'
-      : '<span class="rtfc-source-text">' + escapeHtml(url) + '</span>';
-  }).join('');
-
-  const lexicalRows = buildLexicalRows(result.lexical);
-
   // speaker tag — only show on grounded cards AND only when all speakers confirmed
   // this prevents wrong tags from appearing before diarization stabilizes
-  let speakerTag = '';
   if (!result.pending && allSpeakersConfirmed()) {
     const confirmedName = (result.dominantSpeakerId !== null && result.dominantSpeakerId !== undefined)
       ? confirmedSpeakerMap[result.dominantSpeakerId]
@@ -518,36 +635,103 @@ function buildCard(result) {
     const speakerName  = (normalizedName && !normalizedName.match(/^Speaker\s*\d+$/i)) ? normalizedName : null;
     const speakerColor = speakerName ? getSpeakerColor(speakerName) : null;
     if (speakerColor) {
-      speakerTag = '<div class="rtfc-speaker-tag" style="background:' + speakerColor + '">' + escapeHtml(speakerName) + '</div>';
+      const speakerTag = document.createElement('div');
+      speakerTag.className = 'rtfc-speaker-tag';
+      speakerTag.style.background = speakerColor;
+      speakerTag.textContent = speakerName;
+      card.appendChild(speakerTag);
     }
   }
 
-  card.innerHTML = [
-    speakerTag,
-    '<div class="rtfc-verdict-header">',
-      '<span class="rtfc-badge rtfc-badge--' + color + '">' + escapeHtml(result.verdict) + '</span>',
-      result.pending ? '<span class="rtfc-verifying">⟳ verifying...</span>' : '',
-      '<span class="rtfc-confidence-right">' + escapeHtml(result.confidence) + ' certainty</span>',
-      '<span class="rtfc-timestamp">' + escapeHtml(result._timestamp || '') + '</span>',
-    '</div>',
-    '<p class="rtfc-claim">"' + escapeHtml(result.claim) + '"</p>',
-    '<p class="rtfc-explanation">' + escapeHtml(result.explanation) + '</p>',
-    '<div class="rtfc-speaker-confidence">',
-      '<button class="rtfc-speaker-toggle">',
-        '<span class="rtfc-speaker-dot rtfc-speaker-dot--' + convictionColor + '"></span>',
-        'Speaker conviction: ' + escapeHtml(result.speaker_confidence || 'N/A'),
-        '<span class="rtfc-speaker-arrow">▾</span>',
-      '</button>',
-      '<div class="rtfc-speaker-explanation" style="display:none">',
-        lexicalRows,
-      '</div>',
-    '</div>',
-    (sourcesHTML && sourcesHTML.trim()) ? '<div class="rtfc-sources">' + sourcesHTML + '</div>' : '',
-  ].join('');
+  const header = document.createElement('div');
+  header.className = 'rtfc-verdict-header';
 
-  const toggleBtn = card.querySelector('.rtfc-speaker-toggle');
-  const reasons   = card.querySelector('.rtfc-speaker-explanation');
-  const arrow     = card.querySelector('.rtfc-speaker-arrow');
+  const badge = document.createElement('span');
+  badge.className = 'rtfc-badge rtfc-badge--' + color;
+  badge.textContent = result.verdict || '';
+  header.appendChild(badge);
+
+  if (result.pending) {
+    const verifying = document.createElement('span');
+    verifying.className = 'rtfc-verifying';
+    verifying.textContent = '⟳ verifying...';
+    header.appendChild(verifying);
+  }
+
+  const confidence = document.createElement('span');
+  confidence.className = 'rtfc-confidence-right';
+  confidence.textContent = String(result.confidence || '') + ' certainty';
+  header.appendChild(confidence);
+
+  const timestamp = document.createElement('span');
+  timestamp.className = 'rtfc-timestamp';
+  timestamp.textContent = result._timestamp || '';
+  header.appendChild(timestamp);
+
+  card.appendChild(header);
+
+  const claim = document.createElement('p');
+  claim.className = 'rtfc-claim';
+  claim.textContent = '"' + String(result.claim || '') + '"';
+  card.appendChild(claim);
+
+  const explanation = document.createElement('p');
+  explanation.className = 'rtfc-explanation';
+  explanation.textContent = result.explanation || '';
+  card.appendChild(explanation);
+
+  const speakerConfidence = document.createElement('div');
+  speakerConfidence.className = 'rtfc-speaker-confidence';
+
+  const toggleBtn = document.createElement('button');
+  toggleBtn.className = 'rtfc-speaker-toggle';
+  toggleBtn.type = 'button';
+
+  const dot = document.createElement('span');
+  dot.className = 'rtfc-speaker-dot rtfc-speaker-dot--' + convictionColor;
+  toggleBtn.appendChild(dot);
+  toggleBtn.appendChild(document.createTextNode('Speaker conviction: ' + (result.speaker_confidence || 'N/A')));
+
+  const arrow = document.createElement('span');
+  arrow.className = 'rtfc-speaker-arrow';
+  arrow.textContent = '▾';
+  toggleBtn.appendChild(arrow);
+
+  speakerConfidence.appendChild(toggleBtn);
+
+  const reasons = document.createElement('div');
+  reasons.className = 'rtfc-speaker-explanation';
+  reasons.style.display = 'none';
+  reasons.appendChild(buildLexicalRowsFragment(result.lexical));
+  speakerConfidence.appendChild(reasons);
+
+  card.appendChild(speakerConfidence);
+
+  const safeSources = (result.sources ?? []).filter(url => typeof url === 'string' && url.trim());
+  if (safeSources.length) {
+    const sources = document.createElement('div');
+    sources.className = 'rtfc-sources';
+
+    safeSources.forEach((url, i) => {
+      const isUrl = url.startsWith('http://') || url.startsWith('https://');
+      if (isUrl) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = 'Source ' + (i + 1);
+        sources.appendChild(a);
+      } else {
+        const span = document.createElement('span');
+        span.className = 'rtfc-source-text';
+        span.textContent = url;
+        sources.appendChild(span);
+      }
+    });
+
+    card.appendChild(sources);
+  }
+
   toggleBtn.addEventListener('click', () => {
     const open = reasons.style.display === 'none';
     reasons.style.display = open ? 'block' : 'none';
@@ -656,6 +840,92 @@ function makeDraggable(panel) {
 }
 
 
+// ── Pipeline debug visible ───────────────────────────────────────────────────
+function formatDebugValue(value) {
+  if (value === null || value === undefined) return '∅';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value); }
+    catch (_) { return String(value); }
+  }
+  return String(value);
+}
+
+function stageToHuman(stage) {
+  const map = {
+    deepgram_connected: 'Deepgram connecté',
+    deepgram_interim: 'Transcription interim',
+    deepgram_final_buffer_signal: 'is_final=true / speech_final=false',
+    deepgram_final_speech_signal: 'is_final=true / speech_final=true',
+    deepgram_utterance_end: 'UtteranceEnd',
+    deepgram_event_no_transcript: 'Événement sans transcript',
+    deepgram_empty_transcript: 'Transcript vide',
+    transcript_dispatched_to_overlay: 'Transcript envoyé overlay',
+    final_transcript_received: 'Phrase finale reçue',
+    sentence_window_updated: 'Fenêtre de phrases mise à jour',
+    evaluate_triggered_window: 'Analyse déclenchée',
+    evaluate_triggered_speaker_change: 'Analyse déclenchée changement speaker',
+    evaluate_started: 'evaluateClaims démarré',
+    llm_fast_response_received: 'Réponse LLM reçue',
+    llm_parse_failed: 'Parsing LLM échoué',
+    llm_json_parsed: 'JSON LLM parsé',
+    llm_no_claims_detected: 'Aucun claim détecté',
+    llm_no_usable_verdicts: 'Aucun verdict exploitable',
+    fast_verdicts_sent: 'Verdicts envoyés',
+  };
+  return map[stage] || stage || 'debug';
+}
+
+function renderPipelineDebug(msg) {
+  if (!panel) createPanel();
+  if (!pipelineDebugEl) return;
+
+  const stage = msg.stage || msg.lastAnalysisDebug?.stage || 'unknown';
+  const details = msg.details || {};
+  const stageEl = panel.querySelector('#rtfc-debug-stage');
+  if (stageEl) stageEl.textContent = stageToHuman(stage);
+
+  const lines = [];
+  lines.push('stage: ' + stageToHuman(stage));
+
+  if ('is_final' in details) lines.push('is_final: ' + formatDebugValue(details.is_final));
+  if ('speech_final' in details) lines.push('speech_final: ' + formatDebugValue(details.speech_final));
+  if ('route' in details) lines.push('route: ' + formatDebugValue(details.route));
+
+  if ('sentenceWindowSize' in details) lines.push('sentenceWindow: ' + details.sentenceWindowSize);
+  if ('windowLength' in details) lines.push('windowLength: ' + details.windowLength);
+  if ('sentenceCount' in details) lines.push('sentenceCount: ' + details.sentenceCount);
+  if ('nextTriggerIn' in details) lines.push('next trigger: ' + details.nextTriggerIn + ' phrase(s)');
+  if ('analysisAttemptCount' in details) lines.push('analysisAttempt: ' + details.analysisAttemptCount);
+
+  if ('speaker' in details) lines.push('speaker: ' + formatDebugValue(details.speaker));
+  if ('speakerId' in details) lines.push('speakerId: ' + formatDebugValue(details.speakerId));
+
+  if ('textPreview' in details) lines.push('text: ' + formatDebugValue(details.textPreview));
+  if ('contextPreview' in details) lines.push('context: ' + formatDebugValue(details.contextPreview));
+  if ('rawPreview' in details) lines.push('LLM raw: ' + formatDebugValue(details.rawPreview));
+  if ('resultCount' in details) lines.push('resultCount: ' + formatDebugValue(details.resultCount));
+  if ('count' in details) lines.push('verdictCount: ' + formatDebugValue(details.count));
+  if ('reason' in details) lines.push('reason: ' + formatDebugValue(details.reason));
+  if ('message' in details) lines.push('message: ' + formatDebugValue(details.message));
+
+  const t = msg.at ? new Date(msg.at).toLocaleTimeString() : new Date().toLocaleTimeString();
+  lines.push('time: ' + t);
+
+  pipelineDebugEl.textContent = lines.join('\n');
+
+  // Coloration rapide du statut
+  if (stage.includes('failed') || stage.includes('no_usable')) {
+    pipelineDebugEl.style.color = '#fecaca';
+  } else if (stage.includes('sent') || stage.includes('parsed') || stage.includes('speech_signal')) {
+    pipelineDebugEl.style.color = '#a7f3d0';
+  } else if (stage.includes('buffer') || stage.includes('no_claim')) {
+    pipelineDebugEl.style.color = '#fde68a';
+  } else {
+    pipelineDebugEl.style.color = '#bfdbfe';
+  }
+}
+
 // ── Messages ──────────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg) => {
   console.log('[overlay] message received:', msg.type);
@@ -716,9 +986,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     case 'CAPTURE_ERROR':
       showError(msg.message || msg.error || 'Erreur de capture audio.');
       break;
-
     case 'PIPELINE_DEBUG':
-      // Debug UI désactivé pour la version propre.
       break;
 
     case 'PIPELINE_OK':
