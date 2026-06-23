@@ -1,277 +1,235 @@
-# InTruth — Firefox Real-Time Fact-Checking Extension
+# InTruth — Extension Firefox de fact-checking en temps réel
 
-> **Note**  
-> This repository is a Firefox adaptation of the original [InTruth](https://github.com/rpanigrahi222/intruth-factcheck) project by Risha Panigrahi.  
-> This version focuses on real-time transcription, bilingual French/English support, and configurable LLM-based fact-checking.
+**InTruth** est une extension Firefox qui transcrit l’audio d’une vidéo en direct, détecte les affirmations factuelles, puis affiche des verdicts de vérification directement sur la page.
 
-## Overview
+Elle peut être utilisée sur des vidéos, débats, interviews, conférences, lives ou prises de parole politiques.
 
-**InTruth** is a Firefox extension for real-time fact-checking of spoken content: political debates, interviews, livestreams, conferences, speeches, press briefings, and video discussions.
+Cette version fonctionne avec :
 
-The extension captures the audio of the active tab, sends it to Deepgram for live transcription, extracts factual claims from the transcript with a configured LLM, and displays verdicts directly on the page through an overlay.
-
-The project is designed as a **Bring Your Own Key** tool: users provide their own API keys, and the extension stores them locally in the browser.
-
----
-
-## Main Features
-
-### Real-time audio transcription
-
-InTruth captures tab audio and sends it to Deepgram through a WebSocket connection.
-
-The current version is configured for **French + English transcription** using a multilingual Deepgram setup:
-
-```txt
-model = nova-3
-language = multi
-```
-
-This allows the extension to handle French, English, and mixed French/English speech more reliably.
-
-### Live claim detection
-
-The extension does not analyze raw audio directly. It analyzes the text produced by Deepgram.
-
-The pipeline is:
-
-```txt
-tab audio
-→ Deepgram transcription
-→ final transcript chunks
-→ sentence window
-→ LLM claim extraction
-→ JSON parsing
-→ verdict display
-→ optional web grounding
-```
-
-Only factual, checkable claims are extracted. Opinions, rhetorical statements, vague predictions, and subjective judgments should normally be ignored.
-
-### LLM-based fact-checking
-
-InTruth can use:
-
-- Anthropic-compatible models;
-- OpenAI-compatible endpoints;
-- local OpenAI-compatible servers such as LM Studio;
-- cloud OpenAI-compatible providers such as FantasyAI, if configured in the manifest for testing.
-
-The LLM is expected to return structured JSON verdicts.
-
-### Bilingual claim handling
-
-The current pipeline supports French and English claims. When possible, the LLM can return:
-
-```json
-{
-  "claim": "original claim",
-  "claim_fr": "French version",
-  "claim_en": "English version",
-  "verdict": "UNVERIFIABLE",
-  "speaker": "Speaker 1",
-  "explanation": "Short explanation",
-  "confidence": 0.5
-}
-```
-
-This helps the extension search and reason across French and English sources.
-
-### Runtime status and error handling
-
-The extension now includes more robust handling for:
-
-- invalid LLM API keys;
-- unreachable endpoints;
-- malformed LLM responses;
-- empty LLM responses;
-- unsupported reasoning-model behavior;
-- Deepgram connection errors;
-- model responses that do not contain valid JSON.
-
-Important runtime errors are surfaced to the UI instead of failing silently.
+- **Deepgram** pour la transcription audio ;
+- un **LLM** pour analyser les phrases et produire des verdicts ;
+- des fournisseurs compatibles **Anthropic** ou **OpenAI-compatible** ;
+- des modèles locaux comme **LM Studio** ;
+- des fournisseurs cloud de test comme **FantasyAI**.
 
 ---
 
-## Important: use a non-reasoning model
+## Ce que fait l’extension
 
-This is critical.
+Quand vous lancez InTruth sur une page vidéo :
 
-InTruth expects the LLM response to be available in the OpenAI-compatible response field:
+1. l’extension capture l’audio de l’onglet ;
+2. Deepgram transforme l’audio en texte ;
+3. le texte est découpé en petits blocs ;
+4. le LLM cherche des affirmations factuelles ;
+5. l’extension affiche les claims et les verdicts dans un overlay.
+
+Exemple :
+
+```txt
+Phrase entendue :
+"La capitale de la France est Paris."
+
+Résultat attendu :
+Claim détecté → La capitale de la France est Paris.
+Verdict → TRUE
+```
+
+---
+
+## Important : utiliser un modèle non-reasoning
+
+Pour fonctionner correctement, InTruth a besoin que le modèle renvoie sa réponse finale dans :
 
 ```js
 choices[0].message.content
 ```
 
-Some reasoning/thinking models return their internal reasoning in a field such as:
+Certains modèles de type **reasoning**, **thinking** ou **chain-of-thought** renvoient leur réflexion dans :
 
 ```js
 choices[0].message.reasoning
 ```
 
-while leaving:
+et laissent :
 
 ```js
 choices[0].message.content
 ```
 
-empty.
+vide.
 
-When that happens, InTruth receives a valid API response, but no usable final answer. The result is usually an error such as:
+Dans ce cas, l’extension reçoit bien une réponse du fournisseur, mais elle ne peut pas l’utiliser.
 
-```txt
-Endpoint LLM: response received but text content not found.
-```
+### À retenir
 
-or:
+Utilisez un modèle **chat**, **instruct** ou **non-reasoning**.
 
-```txt
-LLM: empty response, no exploitable analysis received.
-```
+Évitez les modèles qui ne produisent que du raisonnement interne.
 
-### Recommended model behavior
-
-Use a model that:
-
-- returns the final answer in `choices[0].message.content`;
-- follows short JSON instructions reliably;
-- is not reasoning-only;
-- does not hide the final answer inside a `reasoning` field;
-- can return compact JSON arrays.
-
-### Avoid for now
-
-Avoid models that:
-
-- only produce chain-of-thought/reasoning output;
-- return empty `message.content`;
-- require special parameters to expose final answers;
-- do not reliably follow JSON-only instructions.
-
-### Practical test
-
-Before using the extension in a real video, test your model with a simple sentence:
+Si vous voyez une erreur du type :
 
 ```txt
-La capitale de la France est Paris.
+contenu texte introuvable
+message.content vide
+reasoning rempli
 ```
 
-A working model should produce at least one parsed claim and one verdict.
+le problème vient probablement du modèle choisi.
 
 ---
 
-## Supported verdicts
+## Télécharger le projet
 
-The LLM should classify claims using one of these labels:
+Vous pouvez télécharger le dépôt de deux manières.
+
+### Option 1 — Depuis GitHub
+
+Allez sur la page du dépôt :
 
 ```txt
-TRUE
-SUBSTANTIALLY TRUE
-FALSE
-MISLEADING
-UNVERIFIABLE
+https://github.com/Othman-Benbrahim/intruth-factcheck-firefox
 ```
 
-The UI may display these verdicts in a user-friendly form.
+Puis cliquez sur :
+
+```txt
+Code → Download ZIP
+```
+
+Décompressez ensuite le fichier ZIP sur votre ordinateur.
+
+### Option 2 — Avec Git
+
+```bash
+git clone https://github.com/Othman-Benbrahim/intruth-factcheck-firefox.git
+```
 
 ---
 
-## What counts as a verifiable claim?
+## Installer l’extension dans Firefox en local
 
-### Checked
+L’extension se charge manuellement en mode développement.
 
-Examples of claims that can be checked:
+1. Ouvrez Firefox.
+2. Dans la barre d’adresse, entrez :
 
-- “France has more than 60 million inhabitants.”
-- “Donald Trump was president of the United States.”
-- “Inflation reached 9.1% in the United States in 2022.”
-- “This law was passed by the Senate in 2021.”
-- “Iran signed the JCPOA in 2015.”
+```txt
+about:debugging#/runtime/this-firefox
+```
 
-### Ignored
+3. Cliquez sur :
 
-Examples of claims that should usually be ignored:
+```txt
+Load Temporary Add-on
+```
 
-- “This policy is terrible.”
-- “My opponent is dishonest.”
-- “This will destroy the economy.”
-- “I have the best plan.”
-- “People are worried.”
+ou en français :
 
-These are opinions, predictions, value judgments, or vague statements rather than directly checkable factual claims.
+```txt
+Charger un module complémentaire temporaire
+```
+
+4. Sélectionnez le fichier :
+
+```txt
+realtime-factcheck/manifest.json
+```
+
+5. L’extension InTruth apparaît dans Firefox.
+
+Attention : comme c’est un chargement temporaire, l’extension peut disparaître après fermeture complète de Firefox. Il faudra alors la recharger depuis `about:debugging`.
 
 ---
 
-## Configuration
+## Configuration des clés API
 
-### Required API keys
+Ouvrez l’extension depuis l’icône Firefox.
 
-You need:
+Vous devez renseigner :
 
-1. a **Deepgram API key** for transcription;
-2. an **LLM API key** for claim extraction and verdict generation.
+### 1. Clé Deepgram
 
-Depending on your setup, you may also need:
+Elle sert à transcrire l’audio.
 
-3. a **Serper API key** if web search grounding is enabled in your version.
+Champ :
 
-### LLM providers
+```txt
+Deepgram API Key
+```
 
-The popup supports two main provider modes:
+La transcription actuelle est prévue pour fonctionner en français et en anglais.
+
+### 2. Fournisseur LLM
+
+Vous pouvez choisir :
 
 ```txt
 Anthropic
-OpenAI-compatible / LM Studio
 ```
 
-Use **OpenAI-compatible / LM Studio** for providers such as:
+ou :
 
-- LM Studio local server;
-- OpenAI-compatible local endpoints;
-- FantasyAI;
-- other cloud providers exposing `/chat/completions`.
+```txt
+Compatible OpenAI / LM Studio
+```
 
-### FantasyAI test configuration
+Utilisez **Compatible OpenAI / LM Studio** pour :
 
-For FantasyAI, use the OpenAI-compatible mode.
+- LM Studio en local ;
+- FantasyAI ;
+- un autre endpoint compatible OpenAI ;
+- un serveur local compatible `/chat/completions`.
 
-Recommended base endpoint:
+### 3. Endpoint LLM
+
+Pour LM Studio en local, l’endpoint ressemble souvent à :
+
+```txt
+http://localhost:1234/v1
+```
+
+ou :
+
+```txt
+http://127.0.0.1:1234/v1
+```
+
+Pour FantasyAI, utilisez :
 
 ```txt
 https://fantasyai.cloud/api/v1
 ```
 
-Do not paste the full chat-completions URL unless your service-worker is specifically designed to handle it.
+Ne mettez pas forcément l’URL complète `/chat/completions`, car le service-worker peut déjà l’ajouter automatiquement.
 
-The service-worker normally builds:
+### 4. Modèle LLM
 
-```txt
-<base_url>/chat/completions
-```
+Indiquez le nom du modèle utilisé.
 
-So the final request becomes:
+Choisissez un modèle qui répond directement en JSON dans `message.content`.
 
-```txt
-https://fantasyai.cloud/api/v1/chat/completions
-```
+---
 
-### Firefox manifest permissions
+## Permissions dans manifest.json
 
-For cloud providers, Firefox needs the provider domain in `host_permissions`.
+Si vous utilisez un fournisseur cloud, Firefox doit avoir le droit d’appeler son domaine.
 
-For a test version using FantasyAI, add:
+Dans `manifest.json`, ajoutez le domaine dans `host_permissions`.
+
+Exemple pour FantasyAI :
 
 ```json
 "https://fantasyai.cloud/*"
 ```
 
-For Deepgram, add:
+Exemple pour Deepgram :
 
 ```json
 "https://api.deepgram.com/*"
 ```
 
-A typical test configuration may include:
+Exemple complet :
 
 ```json
 "host_permissions": [
@@ -286,282 +244,226 @@ A typical test configuration may include:
 ]
 ```
 
-If you use another cloud LLM provider, add its domain too:
-
-```json
-"https://your-provider-domain.com/*"
-```
-
----
-
-## Installation
-
-### Manual Firefox installation
-
-1. Clone the repository:
-
-```bash
-git clone https://github.com/Othman-Benbrahim/intruth-factcheck-firefox.git
-```
-
-2. Open Firefox.
-
-3. Go to:
+Après modification du `manifest.json`, rechargez l’extension depuis :
 
 ```txt
 about:debugging#/runtime/this-firefox
 ```
 
-4. Click:
+---
+
+## Utiliser l’extension
+
+1. Ouvrez une vidéo compatible.
+2. Cliquez sur l’icône InTruth.
+3. Entrez vos clés API.
+4. Vérifiez que le fournisseur LLM est bien configuré.
+5. Cliquez sur :
 
 ```txt
-Load Temporary Add-on
+Start Fact-Checking
 ```
 
-5. Select the extension `manifest.json` file.
-
-For this repository, the manifest is located in:
-
-```txt
-realtime-factcheck/manifest.json
-```
-
-6. Open a compatible video page.
-
-7. Click the InTruth extension icon.
-
-8. Enter your API keys and LLM configuration.
-
-9. Start fact-checking.
+6. Lancez la vidéo.
+7. L’overlay apparaît sur la page.
+8. Les transcriptions, claims et verdicts s’affichent progressivement.
 
 ---
 
-## Usage
+## Tester rapidement si tout fonctionne
 
-1. Open a video, livestream, debate, speech, interview, or press conference.
-2. Click the extension icon.
-3. Configure:
-   - Deepgram API key;
-   - LLM provider;
-   - LLM endpoint;
-   - LLM model;
-   - LLM API key.
-4. Start the session.
-5. The overlay appears on the page.
-6. The transcript is generated in real time.
-7. The service-worker groups final transcript chunks.
-8. The LLM extracts checkable claims.
-9. Verdicts appear in the overlay.
+Avant de tester sur une vraie vidéo politique, utilisez une phrase simple.
 
----
-
-## How the pipeline works
-
-### 1. Audio capture
-
-The content script captures audio from the active tab after the user starts a session.
-
-### 2. Deepgram transcription
-
-Audio chunks are streamed to Deepgram.
-
-The extension uses a multilingual transcription mode so French and English speech can be handled in the same session.
-
-### 3. Final transcript chunks
-
-The service-worker listens for final Deepgram segments.
-
-Only final text chunks are sent into the claim-analysis pipeline.
-
-### 4. Sentence window
-
-The service-worker groups final transcript chunks into a short window before analysis.
-
-This reduces noise and gives the LLM enough context to detect meaningful factual statements.
-
-### 5. LLM analysis
-
-The LLM receives the transcript window and returns a JSON array of possible claims and verdicts.
-
-### 6. JSON parsing
-
-The service-worker parses the response.
-
-The parser is designed to tolerate common LLM formatting issues, such as:
-
-- Markdown code fences;
-- text around JSON;
-- object instead of array;
-- small JSON formatting errors;
-- compact partial results.
-
-### 7. Verdict display
-
-When valid claims are found, the service-worker sends them to the overlay.
-
-### 8. Optional grounding
-
-If enabled, the extension can run search-based grounding and update verdicts with sources.
-
----
-
-## Troubleshooting
-
-### Deepgram transcribes but no verdict appears
-
-This means audio and transcription are working. The issue is probably after transcription:
-
-```txt
-transcript OK
-→ sentence window OK
-→ LLM call or JSON parsing issue
-```
-
-Check:
-
-- whether your LLM endpoint is correct;
-- whether your model returns content in `choices[0].message.content`;
-- whether the model is non-reasoning;
-- whether the model follows JSON-only instructions;
-- whether the transcript contains actual factual claims.
-
-### Error: content text not found
-
-If you see an error like:
-
-```txt
-Endpoint LLM: response received but text content not found.
-```
-
-then the API responded, but the extension could not find usable text.
-
-Common cause:
-
-```js
-choices[0].message.content === ""
-choices[0].message.reasoning !== ""
-```
-
-This usually means the selected model is a reasoning/thinking model.
-
-Use a non-reasoning chat/instruct model instead.
-
-### Error: JSON invalid
-
-This means the model answered, but the answer was not valid JSON.
-
-Try:
-
-- a smaller/faster model that follows formatting instructions;
-- a non-reasoning model;
-- shorter transcript windows;
-- simpler prompts;
-- a model known to return structured JSON reliably.
-
-### FantasyAI endpoint issues
-
-Use:
-
-```txt
-https://fantasyai.cloud/api/v1
-```
-
-as the base URL.
-
-Avoid accidentally creating:
-
-```txt
-/chat/completions/chat/completions
-```
-
-in the final request URL.
-
-### Local LM Studio
-
-If using LM Studio, use an endpoint similar to:
-
-```txt
-http://localhost:1234/v1
-```
-
-or:
-
-```txt
-http://127.0.0.1:1234/v1
-```
-
-Make sure the model is loaded and the server is running.
-
-### Firefox permission issue
-
-If a cloud request is blocked, add the provider domain to `host_permissions` in `manifest.json`.
-
-Example:
-
-```json
-"https://fantasyai.cloud/*"
-```
-
-Then reload the temporary extension in Firefox.
-
----
-
-## Privacy
-
-- API keys are stored locally in Firefox storage.
-- The extension author does not receive user keys.
-- Audio is sent to Deepgram for transcription.
-- Transcript chunks are sent to the configured LLM provider for analysis.
-- If web grounding is enabled, claim queries may be sent to a search provider.
-- Users should review the privacy policies of their chosen API providers.
-
----
-
-## Limitations
-
-Real-time fact-checking is difficult.
-
-InTruth can produce:
-
-- false positives;
-- missed claims;
-- incomplete verdicts;
-- outdated analysis;
-- overconfident judgments;
-- errors caused by poor transcription;
-- errors caused by ambiguous speech;
-- errors caused by LLM formatting failures.
-
-The extension is an assistance tool, not an authority.
-
-Always consult primary sources for important claims.
-
----
-
-## Recommended test phrase
-
-After configuration, test the pipeline with:
+Par exemple, lancez une vidéo ou un audio contenant :
 
 ```txt
 La capitale de la France est Paris.
 ```
 
-Expected behavior:
+Résultat attendu :
 
 ```txt
-Deepgram transcribes the sentence
-→ LLM extracts the claim
-→ JSON is parsed
-→ a verdict appears in the overlay
+Transcription visible
+Claim détecté
+Verdict affiché
 ```
 
-If this does not work, the problem is likely in the LLM configuration or model behavior.
+Si la transcription s’affiche mais pas le verdict, le problème vient probablement du LLM, du modèle choisi ou du format JSON renvoyé.
 
 ---
 
-## Project structure
+## Comprendre les erreurs fréquentes
 
-Typical structure:
+### La transcription fonctionne, mais aucun verdict n’apparaît
+
+Cela veut dire que Deepgram fonctionne.
+
+Le problème se situe probablement ici :
+
+```txt
+LLM
+modèle choisi
+réponse JSON
+endpoint
+clé API
+```
+
+Vérifiez que le modèle n’est pas un modèle reasoning-only.
+
+### Erreur : réponse vide du LLM
+
+Le fournisseur répond peut-être, mais le modèle ne renvoie rien dans `message.content`.
+
+Essayez un autre modèle non-reasoning.
+
+### Erreur : JSON invalide
+
+Le modèle répond, mais pas dans le bon format.
+
+Essayez :
+
+- un modèle plus simple ;
+- un modèle instruct/chat ;
+- un transcript plus court ;
+- un modèle connu pour respecter les consignes JSON.
+
+### Erreur : contenu texte introuvable
+
+Cela arrive souvent quand la réponse ressemble à :
+
+```json
+{
+  "message": {
+    "content": "",
+    "reasoning": "..."
+  }
+}
+```
+
+Dans ce cas, changez de modèle.
+
+### Endpoint incorrect
+
+Pour un endpoint OpenAI-compatible, utilisez généralement une base URL :
+
+```txt
+https://fournisseur.com/api/v1
+```
+
+et non :
+
+```txt
+https://fournisseur.com/api/v1/chat/completions
+```
+
+si le service-worker ajoute déjà `/chat/completions`.
+
+---
+
+## Utilisation avec LM Studio en local
+
+1. Ouvrez LM Studio.
+2. Chargez un modèle chat/instruct.
+3. Lancez le serveur local.
+4. Dans InTruth, choisissez :
+
+```txt
+Compatible OpenAI / LM Studio
+```
+
+5. Mettez comme endpoint :
+
+```txt
+http://localhost:1234/v1
+```
+
+6. Entrez le nom du modèle chargé.
+7. Lancez InTruth.
+
+Si rien ne se passe, vérifiez que le serveur LM Studio est bien actif.
+
+---
+
+## Utilisation avec FantasyAI
+
+Pour une version de test avec FantasyAI :
+
+1. Ajoutez dans `manifest.json` :
+
+```json
+"https://fantasyai.cloud/*"
+```
+
+2. Rechargez l’extension dans Firefox.
+3. Dans la popup InTruth, choisissez :
+
+```txt
+Compatible OpenAI / LM Studio
+```
+
+4. Mettez comme endpoint :
+
+```txt
+https://fantasyai.cloud/api/v1
+```
+
+5. Entrez votre clé API FantasyAI.
+6. Choisissez un modèle non-reasoning.
+7. Lancez le test.
+
+Si un modèle renvoie seulement du `reasoning` mais pas de `content`, changez de modèle.
+
+---
+
+## Mode debugging Firefox
+
+Pour comprendre un problème, utilisez les outils de debug Firefox.
+
+### Ouvrir le debug de l’extension
+
+1. Allez sur :
+
+```txt
+about:debugging#/runtime/this-firefox
+```
+
+2. Trouvez InTruth.
+3. Cliquez sur :
+
+```txt
+Inspect
+```
+
+ou :
+
+```txt
+Inspecter
+```
+
+4. Ouvrez la console.
+
+Vous pourrez voir les erreurs du service-worker :
+
+```txt
+erreur LLM
+réponse vide
+JSON invalide
+endpoint inaccessible
+clé invalide
+```
+
+### Recharger l’extension
+
+Après chaque modification de fichier :
+
+1. retournez dans `about:debugging` ;
+2. cliquez sur `Reload` ou `Recharger` ;
+3. rechargez aussi la page vidéo ;
+4. relancez l’extension.
+
+---
+
+## Structure du projet
 
 ```txt
 realtime-factcheck/
@@ -581,39 +483,83 @@ realtime-factcheck/
 └── assets/
 ```
 
-Key files:
-
-- `service-worker.js`: Deepgram WebSocket, LLM calls, claim extraction, verdict routing.
-- `overlay.js`: on-page UI for transcript, claims, verdicts, and runtime errors.
-- `popup.js`: provider configuration, key validation, start/stop controls.
-- `manifest.json`: Firefox permissions and extension configuration.
-
----
-
-## Development notes
-
-When debugging the pipeline, check the order:
+### Fichiers importants
 
 ```txt
-Deepgram connected
-→ transcript received
-→ sentence window updated
-→ evaluateClaims started
-→ LLM HTTP response received
-→ content extracted
-→ JSON parsed
-→ verdicts sent
+manifest.json
 ```
 
-If the pipeline stops at `content extracted`, check the model response shape.
+Déclare les permissions Firefox et les domaines autorisés.
 
-If it stops at `JSON parsed`, check whether the model returns valid JSON.
+```txt
+service-worker.js
+```
 
-If verdicts are sent but not shown, inspect `overlay.js`.
+Gère Deepgram, le LLM, les claims, les verdicts et les erreurs.
+
+```txt
+overlay.js
+```
+
+Affiche l’interface sur la page vidéo.
+
+```txt
+popup.js
+```
+
+Gère la popup, les clés API et le bouton de lancement.
 
 ---
 
-## License
+## Confidentialité
 
-MIT License. See `LICENSE`.
+Les clés API sont stockées localement dans Firefox.
+
+L’audio est envoyé à Deepgram pour transcription.
+
+Le texte transcrit est envoyé au fournisseur LLM configuré par l’utilisateur.
+
+Si la recherche web est activée, certaines affirmations peuvent être envoyées à un moteur de recherche ou à une API de recherche.
+
+N’utilisez pas cette extension sur des contenus sensibles si vous ne voulez pas que l’audio ou le transcript soit transmis à des services externes.
+
+---
+
+## Limites
+
+InTruth est un outil expérimental.
+
+Il peut :
+
+- manquer des affirmations ;
+- mal interpréter une phrase ;
+- produire un verdict incomplet ;
+- dépendre fortement de la qualité de transcription ;
+- échouer si le modèle ne respecte pas le format JSON ;
+- afficher `UNVERIFIABLE` quand le contexte manque.
+
+L’extension aide à analyser un discours, mais ne remplace pas une vérification humaine.
+
+---
+
+## Résumé rapide
+
+Pour que l’extension fonctionne :
+
+```txt
+1. Charger manifest.json dans Firefox via about:debugging
+2. Ajouter les domaines cloud dans host_permissions
+3. Entrer une clé Deepgram valide
+4. Entrer une clé LLM valide
+5. Utiliser un modèle non-reasoning
+6. Vérifier que le modèle écrit dans message.content
+7. Tester avec une phrase simple
+8. Lancer le fact-checking
+```
+
+---
+
+## Licence
+
+MIT License.
 
