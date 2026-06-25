@@ -372,7 +372,7 @@ function createPanel() {
   const exportBtn = document.createElement('button');
   exportBtn.id = 'rtfc-export';
   exportBtn.type = 'button';
-  exportBtn.title = 'Export session as PDF';
+  exportBtn.title = 'Exporter la session en Markdown';
   exportBtn.textContent = '↓ Export';
   headerActions.appendChild(exportBtn);
 
