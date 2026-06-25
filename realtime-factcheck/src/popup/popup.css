@@ -157,3 +157,24 @@ body {
 .toggle-btn:hover { opacity: 0.85; }
 .toggle-btn.active { background: #166534; }
 .toggle-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* ── Listes déroulantes (Fournisseur LLM / Préréglage) ──────────────────────── */
+/* Sans fond opaque, la liste dépliée hérite du fond translucide de .key-input
+   et le texte des options devient illisible (cf. capture). On force un fond
+   opaque et un texte bien contrasté, à l'état fermé comme déplié. */
+
+select.key-input {
+  background-color: #1c1c1c;   /* opaque (remplace le rgba translucide) */
+  color: #e8e8e8;
+  cursor: pointer;
+}
+
+select.key-input option {
+  background-color: #1c1c1c;
+  color: #e8e8e8;
+}
+
+select.key-input option:checked,
+select.key-input option:hover {
+  background-color: #2a2a2a;
+  color: #ffffff;
+}
