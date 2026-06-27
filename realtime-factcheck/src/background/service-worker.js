@@ -19,6 +19,7 @@ let LLM_MODEL    = '';            // identifiant du modèle
 let LLM_REASONING = false;        // true si modèle "reasoning" (o-series, R1…)
 let DEEPGRAM_KEY = '';
 const SERPER_KEY = '';
+let FACTCHECK_KEY = '';           // clé Google Fact Check Tools (facultative, BYOK)
 
 const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -461,18 +462,19 @@ async function validateKeysBeforeStart(configFromPopup = {}) {
 async function loadKeys() {
   // browser.storage renvoie une Promise sous Firefox (pas de callback).
   const local = await browserAPI.storage.local.get([
-    'deepgramKey', 'llmProvider', 'llmApiKey', 'llmEndpoint', 'llmModel', 'llmReasoning', 'anthropicKey',
+    'deepgramKey', 'llmProvider', 'llmApiKey', 'llmEndpoint', 'llmModel', 'llmReasoning', 'anthropicKey', 'factCheckKey',
   ]);
   // Si la mémorisation est désactivée, les clés sont en storage.session
   // (mémoire de session, non écrite sur le disque). On lit les deux, la
   // session étant prioritaire pour les valeurs secrètes.
   let session = {};
   try {
-    session = await browserAPI.storage.session.get(['deepgramKey', 'llmApiKey', 'llmEndpoint', 'llmModel']);
+    session = await browserAPI.storage.session.get(['deepgramKey', 'llmApiKey', 'llmEndpoint', 'llmModel', 'factCheckKey']);
   } catch (_) { session = {}; }
   const pick = (k) => (session && session[k] !== undefined && session[k] !== '') ? session[k] : local[k];
 
   DEEPGRAM_KEY  = pick('deepgramKey') || '';
+  FACTCHECK_KEY = (pick('factCheckKey') || '').trim();
   LLM_PROVIDER  = local.llmProvider || 'anthropic';
   LLM_ENDPOINT  = (pick('llmEndpoint') || '').trim();
   LLM_MODEL     = (pick('llmModel')    || '').trim();
@@ -546,7 +548,12 @@ const BLOCKED_DOMAINS = [
   'bostonkravmaga.com',
 ];
 
+// Chaque source renvoie une liste d'objets de preuve homogènes :
+//   { source: 'web'|'wikipedia'|'factcheck', title, snippet, link }
+// Le snippet contient le texte de preuve effectivement lu par le LLM.
+
 async function searchWeb(query, retries = 2) {
+  if (!SERPER_KEY) return []; // pas de clé Serper → on s'appuie sur les autres sources
   try {
     const res = await fetch('https://google.serper.dev/search', {
       method: 'POST',
@@ -555,9 +562,15 @@ async function searchWeb(query, retries = 2) {
     });
     const data = await res.json();
     return (data.organic ?? [])
-      .map(r => r.link)
-      .filter(url => url && !BLOCKED_DOMAINS.some(d => url.includes(d)))
-      .slice(0, 3);
+      .filter(r => r.link && !BLOCKED_DOMAINS.some(d => r.link.includes(d)))
+      .slice(0, 4)
+      .map(r => ({
+        source:  'web',
+        title:   (r.title || '').trim(),
+        // on garde l'extrait que Serper renvoie déjà : c'est le texte de preuve
+        snippet: (r.snippet || '').replace(/\s+/g, ' ').trim(),
+        link:    r.link,
+      }));
   } catch (err) {
     if (retries > 0) {
       await new Promise(r => setTimeout(r, 500));
@@ -566,6 +579,141 @@ async function searchWeb(query, retries = 2) {
     console.error('[serper] error:', err);
     return [];
   }
+}
+
+// ── Wikipédia (sans clé) ──────────────────────────────────────────────────────
+// API MediaWiki : extrait d'introduction en texte brut des pages les mieux
+// classées pour la requête. Aucune clé requise.
+
+async function fetchWikipedia(query, lang) {
+  try {
+    const url = `https://${lang}.wikipedia.org/w/api.php?` + new URLSearchParams({
+      action: 'query',
+      format: 'json',
+      origin: '*',
+      generator: 'search',
+      gsrsearch: query,
+      gsrlimit: '2',
+      prop: 'extracts',
+      exintro: '1',
+      explaintext: '1',
+      exchars: '600',
+    }).toString();
+    const res = await fetch(url);
+    const data = await res.json();
+    const pages = data?.query?.pages;
+    if (!pages) return [];
+    return Object.values(pages)
+      .filter(p => p && p.extract)
+      .map(p => ({
+        source:  'wikipedia',
+        title:   `Wikipédia (${lang}) — ${p.title}`,
+        snippet: p.extract.replace(/\s+/g, ' ').trim().slice(0, 600),
+        link:    `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(String(p.title).replace(/ /g, '_'))}`,
+      }));
+  } catch (err) {
+    console.error('[wikipedia] error:', err);
+    return [];
+  }
+}
+
+async function searchWikipedia(query) {
+  // anglais (couverture la plus large) + français en parallèle
+  const groups = await Promise.all([
+    fetchWikipedia(query, 'en'),
+    fetchWikipedia(query, 'fr'),
+  ]);
+  return groups.flat();
+}
+
+// ── Google Fact Check Tools (clé facultative) ────────────────────────────────
+// Renvoie les fact-checks DÉJÀ publiés par des organismes (AFP, PolitiFact…)
+// pour l'affirmation : éditeur, note textuelle, titre et URL de l'article.
+
+async function searchFactCheck(query, retries = 1) {
+  if (!FACTCHECK_KEY) return [];
+  try {
+    const url = 'https://factchecktools.googleapis.com/v1alpha1/claims:search?' + new URLSearchParams({
+      query,
+      pageSize: '5',
+      key: FACTCHECK_KEY,
+    }).toString();
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data && data.error) {
+      console.error('[factcheck] API error:', data.error.message);
+      notifyPipelineError('Fact Check API : ' + (data.error.message || 'erreur'), 'search', { fatal: false });
+      return [];
+    }
+    const items = [];
+    for (const c of (data.claims ?? [])) {
+      const review = (c.claimReview ?? [])[0];
+      if (!review || !review.url) continue;
+      const publisher = review.publisher?.name || review.publisher?.site || 'éditeur inconnu';
+      const rating    = review.textualRating || 'note non précisée';
+      const claimText = (c.text || '').trim();
+      const claimant  = c.claimant ? ` (déclarée par ${c.claimant})` : '';
+      items.push({
+        source:  'factcheck',
+        title:   `Fact-check — ${publisher} · verdict : ${rating}`,
+        snippet: `Affirmation déjà vérifiée${claimant} : "${claimText}". ${review.title || ''}`.replace(/\s+/g, ' ').trim(),
+        link:    review.url,
+      });
+    }
+    return items;
+  } catch (err) {
+    if (retries > 0) {
+      await new Promise(r => setTimeout(r, 400));
+      return searchFactCheck(query, retries - 1);
+    }
+    console.error('[factcheck] error:', err);
+    return [];
+  }
+}
+
+// ── Agrégation des preuves ───────────────────────────────────────────────────
+
+function dedupeByLink(items) {
+  const seen = new Set();
+  const out = [];
+  for (const it of items) {
+    if (!it || !it.link || seen.has(it.link)) continue;
+    seen.add(it.link);
+    out.push(it);
+  }
+  return out;
+}
+
+function buildEvidenceText(items) {
+  const labelFor = (s) =>
+    s === 'web'       ? 'Web' :
+    s === 'wikipedia' ? 'Wikipédia' :
+    s === 'factcheck' ? 'Fact-check existant' : 'Source';
+  return items.map((it, i) => {
+    let domain = '';
+    try { domain = new URL(it.link).hostname.replace(/^www\./, ''); } catch (_) {}
+    const head = `[${i + 1}] (${labelFor(it.source)}) ${it.title || domain}` +
+      (it.source === 'web' && domain ? ` — ${domain}` : '');
+    const body = it.snippet ? `\n    ${it.snippet}` : '';
+    return `${head}${body}\n    ${it.link}`;
+  }).join('\n');
+}
+
+// Interroge en parallèle Web (Serper), Wikipédia et Fact Check, puis fusionne.
+async function gatherEvidence(queries) {
+  const q0 = queries[0];
+  const tasks = [];
+  for (const q of queries) tasks.push(searchWeb(q));   // web sur chaque variante (bilingue)
+  tasks.push(searchWikipedia(q0));                     // wikipédia (sans clé)
+  tasks.push(searchFactCheck(q0));                     // fact-checks existants (si clé)
+
+  const groups = await Promise.all(tasks.map(p => Promise.resolve(p).catch(() => [])));
+  const items  = dedupeByLink(groups.flat()).slice(0, 7);
+  return {
+    items,
+    sources: items.map(it => it.link),  // URLs affichées dans la carte de verdict
+    text:    buildEvidenceText(items),  // bloc de preuves lu par le LLM
+  };
 }
 
 // ── Claude ────────────────────────────────────────────────────────────────────
@@ -1755,8 +1903,8 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
           fastResult.translation_en,
           fastResult.translation_fr,
         ].filter(Boolean))].slice(0, 3);
-        const urlGroups = await Promise.all(searchQueries.map(q => searchWeb(q)));
-        const urls = [...new Set(urlGroups.flat())].slice(0, 5);
+        const urlGroups = await gatherEvidence(searchQueries);
+        const urls = urlGroups.sources;
         if (!urls.length) {
           // La recherche web est indisponible ou n'a rien trouvé : on clôt le verdict rapide
           // au lieu de laisser l'interface bloquée en état pending.
@@ -1770,7 +1918,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
           };
         }
         const raw = await callLLM(
-          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nWeb search results:\n${urls.join('\n')}${lexicalContext}`,
+          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nSources (web, Wikipédia, fact-checks déjà publiés) — base ton verdict sur ces éléments. Si un fact-check d'un organisme reconnu existe déjà, accorde-lui un poids fort :\n${urlGroups.text}${lexicalContext}`,
           EVALUATE_PROMPT
         );
         const parsed = parseArrayWithDiagnostics(raw);
