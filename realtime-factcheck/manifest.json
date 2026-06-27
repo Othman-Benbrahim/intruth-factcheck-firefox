@@ -1,5 +1,5 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 4,
   "name": "InTruth",
   "version": "1.4.0",
   "description": "Extension Firefox de fact-checking en temps réel à partir de la transcription audio",
