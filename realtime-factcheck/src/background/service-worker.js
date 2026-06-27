@@ -552,8 +552,21 @@ const BLOCKED_DOMAINS = [
 //   { source: 'web'|'wikipedia'|'factcheck', title, snippet, link }
 // Le snippet contient le texte de preuve effectivement lu par le LLM.
 
+// ── Galaxie Open Data : capteurs thématiques gratuits ────────────────────────
+// Chaque capteur renvoie une liste d'objets de preuve homogènes :
+//   { source, title, snippet, link }
+// Le snippet contient le texte de preuve effectivement lu par le LLM.
+// Aucune de ces sources ne donne le verdict : elles fournissent le contexte,
+// le LLM pèse les témoignages.
+
+// Adresse de courtoisie pour les "polite pools" (OpenAlex, Crossref, Nominatim).
+// À personnaliser : certains serveurs universitaires l'exigent.
+const CONTACT_EMAIL = 'intruth@othmanbenbrahim.dev';
+
+// ── Web (Serper) ──────────────────────────────────────────────────────────────
+
 async function searchWeb(query, retries = 2) {
-  if (!SERPER_KEY) return []; // pas de clé Serper → on s'appuie sur les autres sources
+  if (!SERPER_KEY) return []; // pas de clé Serper → on s'appuie sur les autres capteurs
   try {
     const res = await fetch('https://google.serper.dev/search', {
       method: 'POST',
@@ -567,7 +580,6 @@ async function searchWeb(query, retries = 2) {
       .map(r => ({
         source:  'web',
         title:   (r.title || '').trim(),
-        // on garde l'extrait que Serper renvoie déjà : c'est le texte de preuve
         snippet: (r.snippet || '').replace(/\s+/g, ' ').trim(),
         link:    r.link,
       }));
@@ -581,23 +593,14 @@ async function searchWeb(query, retries = 2) {
   }
 }
 
-// ── Wikipédia (sans clé) ──────────────────────────────────────────────────────
-// API MediaWiki : extrait d'introduction en texte brut des pages les mieux
-// classées pour la requête. Aucune clé requise.
+// ── Wikipédia / MediaWiki (sans clé) ─────────────────────────────────────────
 
 async function fetchWikipedia(query, lang) {
   try {
     const url = `https://${lang}.wikipedia.org/w/api.php?` + new URLSearchParams({
-      action: 'query',
-      format: 'json',
-      origin: '*',
-      generator: 'search',
-      gsrsearch: query,
-      gsrlimit: '2',
-      prop: 'extracts',
-      exintro: '1',
-      explaintext: '1',
-      exchars: '600',
+      action: 'query', format: 'json', origin: '*',
+      generator: 'search', gsrsearch: query, gsrlimit: '2',
+      prop: 'extracts', exintro: '1', explaintext: '1', exchars: '600',
     }).toString();
     const res = await fetch(url);
     const data = await res.json();
@@ -618,7 +621,6 @@ async function fetchWikipedia(query, lang) {
 }
 
 async function searchWikipedia(query) {
-  // anglais (couverture la plus large) + français en parallèle
   const groups = await Promise.all([
     fetchWikipedia(query, 'en'),
     fetchWikipedia(query, 'fr'),
@@ -626,17 +628,227 @@ async function searchWikipedia(query) {
   return groups.flat();
 }
 
+// ── Wikidata (sans clé) — recherche d'entité + description ────────────────────
+// Version légère : libellé + description de l'entité la mieux appariée.
+// (Les requêtes SPARQL d'ontologie brute restent un chantier à part.)
+
+async function fetchWikidata(query) {
+  try {
+    const url = 'https://www.wikidata.org/w/api.php?' + new URLSearchParams({
+      action: 'wbsearchentities', search: query, language: 'fr', uselang: 'fr',
+      format: 'json', origin: '*', limit: '1', type: 'item',
+    }).toString();
+    const res = await fetch(url);
+    const data = await res.json();
+    const ent = (data.search ?? [])[0];
+    if (!ent) return [];
+    return [{
+      source:  'wikidata',
+      title:   `Wikidata — ${ent.label || ent.id}`,
+      snippet: ent.description ? `${ent.description}.` : `Entité ${ent.id}.`,
+      link:    `https://www.wikidata.org/wiki/${ent.id}`,
+    }];
+  } catch (err) {
+    console.error('[wikidata] error:', err);
+    return [];
+  }
+}
+
+// ── GDELT — événements et actualité mondiale (sans clé) ───────────────────────
+
+async function fetchGdelt(query) {
+  try {
+    const url = 'https://api.gdeltproject.org/api/v2/doc/doc?' + new URLSearchParams({
+      query, mode: 'artlist', format: 'json', maxrecords: '3', sort: 'hybridrel',
+    }).toString();
+    const res = await fetch(url);
+    const data = await res.json().catch(() => ({}));
+    return (data.articles ?? []).slice(0, 3).map(a => ({
+      source:  'gdelt',
+      title:   (a.title || '').trim(),
+      snippet: `${a.domain || ''}${a.seendate ? ' · ' + a.seendate : ''}`.trim(),
+      link:    a.url,
+    })).filter(i => i.link);
+  } catch (err) {
+    console.error('[gdelt] error:', err);
+    return [];
+  }
+}
+
+// ── Nominatim / OpenStreetMap — vérification spatiale (sans clé) ──────────────
+// Politique stricte : on s'identifie via le paramètre email (mécanisme officiel,
+// car l'en-tête User-Agent n'est pas modifiable depuis un fetch navigateur),
+// on limite à 1 résultat et on s'appuie fortement sur le cache.
+
+async function fetchNominatim(query) {
+  try {
+    const url = 'https://nominatim.openstreetmap.org/search?' + new URLSearchParams({
+      q: query, format: 'jsonv2', limit: '1', email: CONTACT_EMAIL,
+    }).toString();
+    const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    const data = await res.json().catch(() => []);
+    return (Array.isArray(data) ? data : []).slice(0, 1).map(p => ({
+      source:  'nominatim',
+      title:   `Lieu — ${p.display_name || query}`,
+      snippet: `Type : ${p.type || p.category || 'n/d'}. Coordonnées : ${p.lat}, ${p.lon}.`,
+      link:    `https://www.openstreetmap.org/?mlat=${p.lat}&mlon=${p.lon}#map=12/${p.lat}/${p.lon}`,
+    }));
+  } catch (err) {
+    console.error('[nominatim] error:', err);
+    return [];
+  }
+}
+
+// ── Europe PMC (PubMed) — consensus médical (sans clé) ────────────────────────
+
+async function fetchEuropePmc(query) {
+  try {
+    const url = 'https://www.ebi.ac.uk/europepmc/webservices/rest/search?' + new URLSearchParams({
+      query, format: 'json', pageSize: '3', resultType: 'lite',
+    }).toString();
+    const res = await fetch(url);
+    const data = await res.json().catch(() => ({}));
+    const list = data?.resultList?.result ?? [];
+    return list.slice(0, 3).map(r => ({
+      source:  'europepmc',
+      title:   (r.title || '').trim(),
+      snippet: `${r.authorString || ''}${r.journalTitle ? ' — ' + r.journalTitle : ''}${r.pubYear ? ' (' + r.pubYear + ')' : ''}. Cité ${r.citedByCount ?? 0} fois.`.replace(/\s+/g, ' ').trim(),
+      link:    r.doi ? `https://doi.org/${r.doi}` : (r.pmid ? `https://europepmc.org/article/MED/${r.pmid}` : ''),
+    })).filter(i => i.link);
+  } catch (err) {
+    console.error('[europepmc] error:', err);
+    return [];
+  }
+}
+
+// ── OpenAlex — recherche académique (sans clé, polite pool via mailto) ────────
+
+function reconstructAbstract(inv) {
+  if (!inv) return '';
+  const words = [];
+  for (const [w, positions] of Object.entries(inv)) {
+    for (const p of positions) words[p] = w;
+  }
+  return words.filter(Boolean).join(' ').replace(/\s+/g, ' ').slice(0, 400);
+}
+
+async function fetchOpenAlex(query) {
+  try {
+    const url = 'https://api.openalex.org/works?' + new URLSearchParams({
+      search: query, per_page: '3', mailto: CONTACT_EMAIL,
+    }).toString();
+    const res = await fetch(url);
+    const data = await res.json().catch(() => ({}));
+    return (data.results ?? []).slice(0, 3).map(w => {
+      const abs = reconstructAbstract(w.abstract_inverted_index);
+      return {
+        source:  'openalex',
+        title:   (w.display_name || '').trim(),
+        snippet: `${w.publication_year || ''} · cité ${w.cited_by_count ?? 0} fois.${abs ? ' ' + abs : ''}`.trim(),
+        link:    w.doi || w.id || '',
+      };
+    }).filter(i => i.link);
+  } catch (err) {
+    console.error('[openalex] error:', err);
+    return [];
+  }
+}
+
+// ── Crossref — intégrité scientifique (sans clé, détecte les rétractations) ───
+
+async function fetchCrossref(query) {
+  try {
+    const url = 'https://api.crossref.org/works?' + new URLSearchParams({
+      query, rows: '3',
+      select: 'title,DOI,issued,container-title,update-to,is-referenced-by-count',
+      mailto: CONTACT_EMAIL,
+    }).toString();
+    const res = await fetch(url);
+    const data = await res.json().catch(() => ({}));
+    const items = data?.message?.items ?? [];
+    return items.slice(0, 3).map(it => {
+      const title = (it.title && it.title[0]) ? it.title[0] : '';
+      const year  = it.issued?.['date-parts']?.[0]?.[0] || '';
+      const venue = (it['container-title'] && it['container-title'][0]) || '';
+      const retracted = Array.isArray(it['update-to']) &&
+        it['update-to'].some(u => /retract/i.test((u.type || '') + ' ' + (u.label || '')));
+      const flag = retracted ? ' ⚠️ ARTICLE RÉTRACTÉ' : '';
+      return {
+        source:  'crossref',
+        title:   String(title).trim(),
+        snippet: `${venue}${year ? ' (' + year + ')' : ''} · cité ${it['is-referenced-by-count'] ?? 0} fois.${flag}`.trim(),
+        link:    it.DOI ? `https://doi.org/${it.DOI}` : '',
+      };
+    }).filter(i => i.link);
+  } catch (err) {
+    console.error('[crossref] error:', err);
+    return [];
+  }
+}
+
+// ── Banque Mondiale — chiffres officiels d'États (sans clé) ───────────────────
+// Paramétrique (pays + indicateur + année) : on mappe quelques pays et
+// indicateurs courants depuis le texte de l'affirmation.
+
+const WB_COUNTRY_ISO = {
+  'france': 'FR', 'états-unis': 'US', 'etats-unis': 'US', 'usa': 'US', 'united states': 'US', 'america': 'US',
+  'chine': 'CN', 'china': 'CN', 'allemagne': 'DE', 'germany': 'DE', 'royaume-uni': 'GB', 'uk': 'GB', 'united kingdom': 'GB',
+  'espagne': 'ES', 'spain': 'ES', 'italie': 'IT', 'italy': 'IT', 'japon': 'JP', 'japan': 'JP', 'canada': 'CA',
+  'inde': 'IN', 'india': 'IN', 'brésil': 'BR', 'bresil': 'BR', 'brazil': 'BR', 'russie': 'RU', 'russia': 'RU',
+  'mexique': 'MX', 'mexico': 'MX',
+};
+
+const WB_INDICATORS = [
+  { re: /\binflation\b/i,                           code: 'FP.CPI.TOTL.ZG',   label: 'Inflation (prix à la consommation, % annuel)' },
+  { re: /\b(ch[ôo]mage|unemployment)\b/i,           code: 'SL.UEM.TOTL.ZS',   label: 'Chômage (% population active)' },
+  { re: /\b(croissance|gdp growth)\b/i,             code: 'NY.GDP.MKTP.KD.ZG', label: 'Croissance du PIB (% annuel)' },
+  { re: /\b(dette|debt)\b/i,                         code: 'GC.DOD.TOTL.GD.ZS', label: 'Dette publique (% du PIB)' },
+  { re: /\bpopulation\b/i,                           code: 'SP.POP.TOTL',       label: 'Population totale' },
+  { re: /\b(pib|gdp)\b/i,                            code: 'NY.GDP.MKTP.CD',    label: 'PIB (USD courants)' },
+];
+
+function detectCountryIso(text) {
+  const t = (text || '').toLowerCase();
+  for (const [name, iso] of Object.entries(WB_COUNTRY_ISO)) {
+    if (t.includes(name)) return { iso, name };
+  }
+  return null;
+}
+
+async function fetchWorldBank(text) {
+  try {
+    const country = detectCountryIso(text);
+    const ind = WB_INDICATORS.find(i => i.re.test(text));
+    if (!country || !ind) return []; // pays ou indicateur non identifié → on s'abstient
+    const url = `https://api.worldbank.org/v2/country/${country.iso}/indicator/${ind.code}?` + new URLSearchParams({
+      format: 'json', per_page: '8', date: '2014:2024',
+    }).toString();
+    const res = await fetch(url);
+    const data = await res.json().catch(() => null);
+    const series = Array.isArray(data) ? data[1] : null;
+    if (!series || !series.length) return [];
+    const points = series.filter(p => p.value != null).slice(0, 4)
+      .map(p => `${p.date} : ${p.value}`).join(' ; ');
+    if (!points) return [];
+    return [{
+      source:  'worldbank',
+      title:   `Banque Mondiale — ${ind.label} (${country.name})`,
+      snippet: `Données officielles : ${points}.`,
+      link:    `https://data.worldbank.org/indicator/${ind.code}?locations=${country.iso}`,
+    }];
+  } catch (err) {
+    console.error('[worldbank] error:', err);
+    return [];
+  }
+}
+
 // ── Google Fact Check Tools (clé facultative) ────────────────────────────────
-// Renvoie les fact-checks DÉJÀ publiés par des organismes (AFP, PolitiFact…)
-// pour l'affirmation : éditeur, note textuelle, titre et URL de l'article.
 
 async function searchFactCheck(query, retries = 1) {
   if (!FACTCHECK_KEY) return [];
   try {
     const url = 'https://factchecktools.googleapis.com/v1alpha1/claims:search?' + new URLSearchParams({
-      query,
-      pageSize: '5',
-      key: FACTCHECK_KEY,
+      query, pageSize: '5', key: FACTCHECK_KEY,
     }).toString();
     const res = await fetch(url);
     const data = await res.json();
@@ -671,7 +883,60 @@ async function searchFactCheck(query, retries = 1) {
   }
 }
 
-// ── Agrégation des preuves ───────────────────────────────────────────────────
+// ── Cache local (mémoire + TTL) ──────────────────────────────────────────────
+// Dans un discours, les mêmes entités reviennent souvent : on évite de
+// re-requêter une source pour la même entité dans les 10 dernières minutes.
+// (Cache mémoire, suffisant pour une session live ; pas besoin d'IndexedDB.)
+
+const sensorCache = new Map(); // clé -> { at, items }
+const SENSOR_CACHE_TTL = 10 * 60 * 1000;
+
+function sensorCacheKey(sensor, q) {
+  return sensor + '::' + (q || '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+async function cachedSensor(sensor, q, fn) {
+  const key = sensorCacheKey(sensor, q);
+  const now = Date.now();
+  const hit = sensorCache.get(key);
+  if (hit && (now - hit.at) < SENSOR_CACHE_TTL) return hit.items;
+  let items = [];
+  try { items = await fn(); } catch (_) { items = []; }
+  sensorCache.set(key, { at: now, items });
+  if (sensorCache.size > 400) {
+    // éviction du plus ancien
+    let oldestKey = null, oldestAt = Infinity;
+    for (const [k, v] of sensorCache) if (v.at < oldestAt) { oldestAt = v.at; oldestKey = k; }
+    if (oldestKey) sensorCache.delete(oldestKey);
+  }
+  return items;
+}
+
+// ── Smart Router — quels capteurs interroger selon le contenu ────────────────
+// Évite de lancer 10 requêtes par phrase (et de se faire bannir).
+
+const SENSOR_KEYWORDS = {
+  health:  /\b(virus|vaccin\w*|sant[ée]|maladie|m[ée]dica\w*|clinique|patient|cancer|covid|[ée]pid[ée]mie|pand[ée]mie|\boms\b|th[ée]rapie|sympt[ôo]me|health|vaccine|disease|drug|clinical|\bwho\b)\b/i,
+  economy: /\b(pib|inflation|dette|ch[ôo]mage|croissance|d[ée]ficit|budget|gdp|unemployment|debt|deficit|recession|economic)\b/i,
+  geo:     /\b(ville|pays|r[ée]gion|fronti[èe]re|kilom[èe]tres?|\bkms?\b|capitale|continent|oc[ée]an|montagne|fleuve|border|city|country|located|capital|geograph\w*)\b/i,
+  science: /\b([ée]tude|recherche|publication|climat|physique|chimie|biologie|scientifique|study|research|paper|climate|\bscience\b|peer.?review|journal)\b/i,
+};
+
+function routeSensors(text) {
+  const t = text || '';
+  // Socle général, toujours interrogé (sources généralistes peu coûteuses)
+  const sensors = new Set(['wikipedia', 'wikidata', 'gdelt']);
+  if (SENSOR_KEYWORDS.health.test(t))  { sensors.add('europepmc'); sensors.add('crossref'); }
+  if (SENSOR_KEYWORDS.science.test(t)) { sensors.add('openalex');  sensors.add('crossref'); }
+  if (SENSOR_KEYWORDS.economy.test(t)) { sensors.add('worldbank'); }
+  if (SENSOR_KEYWORDS.geo.test(t))     { sensors.add('nominatim'); }
+  // Sources à clé : tentées si la clé est présente (sinon court-circuit interne)
+  sensors.add('web');
+  sensors.add('factcheck');
+  return sensors;
+}
+
+// ── Agrégation des preuves (routeur + cache + parallélisme) ──────────────────
 
 function dedupeByLink(items) {
   const seen = new Set();
@@ -686,9 +951,16 @@ function dedupeByLink(items) {
 
 function buildEvidenceText(items) {
   const labelFor = (s) =>
-    s === 'web'       ? 'Web' :
-    s === 'wikipedia' ? 'Wikipédia' :
-    s === 'factcheck' ? 'Fact-check existant' : 'Source';
+    s === 'web'         ? 'Web' :
+    s === 'wikipedia'   ? 'Wikipédia' :
+    s === 'wikidata'    ? 'Wikidata' :
+    s === 'gdelt'       ? 'Actualité (GDELT)' :
+    s === 'europepmc'   ? 'Médical (Europe PMC)' :
+    s === 'openalex'    ? 'Académique (OpenAlex)' :
+    s === 'crossref'    ? 'Publication (Crossref)' :
+    s === 'worldbank'   ? 'Banque Mondiale' :
+    s === 'nominatim'   ? 'Géo (OpenStreetMap)' :
+    s === 'factcheck'   ? 'Fact-check existant' : 'Source';
   return items.map((it, i) => {
     let domain = '';
     try { domain = new URL(it.link).hostname.replace(/^www\./, ''); } catch (_) {}
@@ -699,16 +971,28 @@ function buildEvidenceText(items) {
   }).join('\n');
 }
 
-// Interroge en parallèle Web (Serper), Wikipédia et Fact Check, puis fusionne.
+// Interroge en parallèle les capteurs choisis par le routeur, avec cache.
 async function gatherEvidence(queries) {
   const q0 = queries[0];
+  const routeText = queries.join(' ');
+  const sensors = routeSensors(routeText);
   const tasks = [];
-  for (const q of queries) tasks.push(searchWeb(q));   // web sur chaque variante (bilingue)
-  tasks.push(searchWikipedia(q0));                     // wikipédia (sans clé)
-  tasks.push(searchFactCheck(q0));                     // fact-checks existants (si clé)
+
+  if (sensors.has('web') && SERPER_KEY) {
+    for (const q of queries) tasks.push(cachedSensor('web', q, () => searchWeb(q)));
+  }
+  if (sensors.has('wikipedia')) tasks.push(cachedSensor('wikipedia', q0, () => searchWikipedia(q0)));
+  if (sensors.has('wikidata'))  tasks.push(cachedSensor('wikidata',  q0, () => fetchWikidata(q0)));
+  if (sensors.has('gdelt'))     tasks.push(cachedSensor('gdelt',     q0, () => fetchGdelt(q0)));
+  if (sensors.has('europepmc')) tasks.push(cachedSensor('europepmc', q0, () => fetchEuropePmc(q0)));
+  if (sensors.has('openalex'))  tasks.push(cachedSensor('openalex',  q0, () => fetchOpenAlex(q0)));
+  if (sensors.has('crossref'))  tasks.push(cachedSensor('crossref',  q0, () => fetchCrossref(q0)));
+  if (sensors.has('worldbank')) tasks.push(cachedSensor('worldbank', routeText, () => fetchWorldBank(routeText)));
+  if (sensors.has('nominatim')) tasks.push(cachedSensor('nominatim', q0, () => fetchNominatim(q0)));
+  if (sensors.has('factcheck') && FACTCHECK_KEY) tasks.push(cachedSensor('factcheck', q0, () => searchFactCheck(q0)));
 
   const groups = await Promise.all(tasks.map(p => Promise.resolve(p).catch(() => [])));
-  const items  = dedupeByLink(groups.flat()).slice(0, 7);
+  const items  = dedupeByLink(groups.flat()).slice(0, 9);
   return {
     items,
     sources: items.map(it => it.link),  // URLs affichées dans la carte de verdict
@@ -1918,7 +2202,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
           };
         }
         const raw = await callLLM(
-          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nSources (web, Wikipédia, fact-checks déjà publiés) — base ton verdict sur ces éléments. Si un fact-check d'un organisme reconnu existe déjà, accorde-lui un poids fort :\n${urlGroups.text}${lexicalContext}`,
+          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nSources (web, encyclopédies, bases scientifiques/médicales, données officielles, actualité, fact-checks déjà publiés) — base ton verdict sur ces éléments. Accorde un poids fort aux données officielles (Banque Mondiale), au consensus scientifique et aux fact-checks d'organismes reconnus ; un article signalé « RÉTRACTÉ » ne doit pas servir de preuve à charge ou à décharge :\n${urlGroups.text}${lexicalContext}`,
           EVALUATE_PROMPT
         );
         const parsed = parseArrayWithDiagnostics(raw);
