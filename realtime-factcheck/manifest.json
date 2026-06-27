@@ -1,7 +1,7 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 4,
   "name": "InTruth",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "Extension Firefox de fact-checking en temps réel à partir de la transcription audio",
   "browser_specific_settings": {
     "gecko": {
@@ -36,6 +36,8 @@
     "https://api.fireworks.ai/*",
     "https://api.perplexity.ai/*",
     "https://google.serper.dev/*",
+    "https://factchecktools.googleapis.com/*",
+    "https://*.wikipedia.org/*",
     "https://api.deepgram.com/*",
     "https://fonts.googleapis.com/*",
     "https://fonts.gstatic.com/*",
