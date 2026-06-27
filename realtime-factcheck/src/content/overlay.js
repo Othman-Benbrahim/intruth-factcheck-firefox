@@ -608,6 +608,32 @@ function buildLexicalRowsFragment(lexical) {
   return fragment;
 }
 
+// ── Dissonance cognitive ─────────────────────────────────────────────────────
+// Croise l'engagement lexical du locuteur (assertif vs prudent, calculé à partir
+// des taux de certitude / hésitation) avec le verdict factuel.
+
+function commitmentFromLexical(lexical) {
+  const r = lexical && lexical.rates;
+  if (!r) return null;
+  const assertive = (r.certainty || 0) + (r.emotional || 0) * 0.5;
+  const hedged    = (r.hedging   || 0) + (r.exclusive || 0) * 0.5 + (r.filler || 0) * 0.3;
+  if (assertive - hedged >= 5) return 'ASSERTIF';
+  if (hedged - assertive >= 5) return 'PRUDENT';
+  return 'NEUTRE';
+}
+
+function computeDissonance(result) {
+  const commit = commitmentFromLexical(result.lexical);
+  if (!commit || commit === 'NEUTRE') return null;
+  const v = result.verdict;
+  const refuted   = v === 'FALSE' || v === 'MISLEADING';
+  const confirmed = v === 'TRUE'  || v === 'SUBSTANTIALLY TRUE';
+  if (commit === 'ASSERTIF' && refuted)   return { level: 'alert', icon: '⚠️', label: 'Péremptoire mais réfuté' };
+  if (commit === 'PRUDENT'  && refuted)   return { level: 'info',  icon: 'ℹ️', label: 'Imprécision prudente' };
+  if (commit === 'ASSERTIF' && confirmed) return { level: 'ok',    icon: '✓',  label: 'Affirmé et confirmé' };
+  return null; // les autres croisements (prudent + exact, invérifiable…) ne sont pas signalés
+}
+
 function buildCard(result) {
   const color = colorForVerdict(result.verdict, result.confidence);
   const convictionColor = result.speaker_confidence === 'HIGH' ? 'green'
@@ -679,6 +705,19 @@ function buildCard(result) {
   explanation.className = 'rtfc-explanation';
   explanation.textContent = result.explanation || '';
   card.appendChild(explanation);
+
+  // Pastille de dissonance cognitive (si le croisement engagement × verdict est notable)
+  const dissonance = computeDissonance(result);
+  if (dissonance) {
+    const diss = document.createElement('div');
+    diss.className = 'rtfc-dissonance rtfc-dissonance--' + dissonance.level;
+    const dicon = document.createElement('span');
+    dicon.className = 'rtfc-dissonance-icon';
+    dicon.textContent = dissonance.icon;
+    diss.appendChild(dicon);
+    diss.appendChild(document.createTextNode(dissonance.label));
+    card.appendChild(diss);
+  }
 
   const speakerConfidence = document.createElement('div');
   speakerConfidence.className = 'rtfc-speaker-confidence';
