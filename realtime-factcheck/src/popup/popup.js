@@ -12,6 +12,7 @@ const modelLabel   = document.getElementById('modelLabel');
 const apiKeyEl     = document.getElementById('llmApiKey');
 const apiKeyLabel  = document.getElementById('apiKeyLabel');
 const deepgramEl   = document.getElementById('deepgramKey');
+const factCheckEl  = document.getElementById('factCheckKey');
 const reasoningEl  = document.getElementById('llmReasoning');
 const reasoningField = document.getElementById('reasoningField');
 const rememberEl   = document.getElementById('rememberKeys');
@@ -29,7 +30,7 @@ let lastValidation = { state: 'idle', ok: null, message: 'Validation non lancée
 const RUNTIME_ERROR_KEYS = ['rtfcLastPipelineError', 'rtfcLastPipelineErrorAt'];
 
 // Clés "coordonnées" persistées selon le choix de mémorisation.
-const SECRET_KEYS = ['llmEndpoint', 'llmModel', 'llmApiKey', 'deepgramKey'];
+const SECRET_KEYS = ['llmEndpoint', 'llmModel', 'llmApiKey', 'deepgramKey', 'factCheckKey'];
 
 function rememberEnabled() { return !rememberEl || rememberEl.checked; }
 
@@ -51,6 +52,7 @@ function collectSecretKeys() {
     llmModel:    modelEl.value.trim(),
     llmApiKey:   apiKeyEl.value.trim(),
     deepgramKey: deepgramEl.value.trim(),
+    factCheckKey: factCheckEl ? factCheckEl.value.trim() : '',
   };
 }
 
@@ -82,7 +84,7 @@ function saveAllForStart() {
 // ── Load saved settings ───────────────────────────────────────────────────────
 
 chrome.storage.local.get(
-  ['llmProvider', 'llmEndpoint', 'llmModel', 'llmApiKey', 'anthropicKey', 'deepgramKey',
+  ['llmProvider', 'llmEndpoint', 'llmModel', 'llmApiKey', 'anthropicKey', 'deepgramKey', 'factCheckKey',
    'llmReasoning', 'rememberKeys', ...RUNTIME_ERROR_KEYS],
   (data) => {
     const remember = data.rememberKeys !== false; // défaut : mémorisation activée
@@ -98,6 +100,7 @@ chrome.storage.local.get(
       if (src.llmApiKey)         apiKeyEl.value = src.llmApiKey;
       else if (data.anthropicKey) apiKeyEl.value = data.anthropicKey;
       if (src.deepgramKey) { deepgramEl.value = src.deepgramKey; deepgramEl.classList.add('saved'); }
+      if (factCheckEl && src.factCheckKey) { factCheckEl.value = src.factCheckKey; factCheckEl.classList.add('saved'); }
     };
 
     if (data.rtfcLastPipelineError) {
@@ -198,6 +201,7 @@ if (presetEl) {
 bindSave(modelEl,    'llmModel');
 bindSave(apiKeyEl,   'llmApiKey');
 bindSave(deepgramEl, 'deepgramKey');
+if (factCheckEl) bindSave(factCheckEl, 'factCheckKey');
 
 // Mode reasoning (préférence non secrète → toujours en local)
 if (reasoningEl) {
@@ -247,6 +251,7 @@ function currentConfig() {
     llmModel: modelEl.value.trim(),
     llmApiKey: apiKeyEl.value.trim(),
     deepgramKey: deepgramEl.value.trim(),
+    factCheckKey: factCheckEl ? factCheckEl.value.trim() : '',
     llmReasoning: reasoningEl ? reasoningEl.checked : false,
   };
 }
