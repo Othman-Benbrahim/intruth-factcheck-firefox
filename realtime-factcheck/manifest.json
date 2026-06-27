@@ -1,7 +1,7 @@
 {
   "manifest_version": 4,
   "name": "InTruth",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Extension Firefox de fact-checking en temps réel à partir de la transcription audio",
   "browser_specific_settings": {
     "gecko": {
@@ -68,7 +68,18 @@
     {
       "matches": [
         "https://www.youtube.com/*",
-        "https://www.twitch.tv/*"
+        "https://www.twitch.tv/*",
+        "https://x.com/*",
+        "https://twitter.com/*",
+        "https://www.facebook.com/*",
+        "https://web.facebook.com/*",
+        "https://rumble.com/*",
+        "https://kick.com/*",
+        "https://www.instagram.com/*",
+        "https://www.tiktok.com/*",
+        "https://bsky.app/*",
+        "https://odysee.com/*",
+        "https://www.dailymotion.com/*"
       ],
       "js": [
         "src/content/lexical-features.js",
