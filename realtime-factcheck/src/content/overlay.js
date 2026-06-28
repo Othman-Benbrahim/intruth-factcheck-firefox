@@ -355,6 +355,8 @@ function createPanel() {
 
   panel = document.createElement('div');
   panel.id = 'rtfc-panel';
+  panel.setAttribute('role', 'complementary');
+  panel.setAttribute('aria-label', 'InTruth — vérification des faits en temps réel');
 
   const header = document.createElement('div');
   header.id = 'rtfc-header';
@@ -373,6 +375,7 @@ function createPanel() {
   exportBtn.id = 'rtfc-export';
   exportBtn.type = 'button';
   exportBtn.title = 'Exporter la session en Markdown';
+  exportBtn.setAttribute('aria-label', 'Exporter la session en Markdown');
   exportBtn.textContent = '↓ Export';
   headerActions.appendChild(exportBtn);
 
@@ -380,6 +383,7 @@ function createPanel() {
   closeBtn.id = 'rtfc-close';
   closeBtn.type = 'button';
   closeBtn.textContent = '✕';
+  closeBtn.setAttribute('aria-label', 'Fermer InTruth');
   headerActions.appendChild(closeBtn);
 
   header.appendChild(headerActions);
@@ -404,6 +408,7 @@ function createPanel() {
   transcriptToggle.id = 'rtfc-transcript-toggle';
   transcriptToggle.type = 'button';
   transcriptToggle.textContent = '▾';
+  transcriptToggle.setAttribute('aria-label', 'Afficher ou masquer la transcription');
   transcriptHeader.appendChild(transcriptToggle);
 
   transcriptSection.appendChild(transcriptHeader);
@@ -455,6 +460,9 @@ function createPanel() {
 
   const verdicts = document.createElement('div');
   verdicts.id = 'rtfc-verdicts';
+  verdicts.setAttribute('role', 'log');
+  verdicts.setAttribute('aria-live', 'polite');
+  verdicts.setAttribute('aria-label', 'Verdicts');
 
   const empty = document.createElement('p');
   empty.className = 'rtfc-empty';
@@ -642,6 +650,8 @@ function buildCard(result) {
 
   const card = document.createElement('div');
   card.className = 'rtfc-verdict rtfc-verdict--' + color + (result.pending ? ' rtfc-verdict--pending' : '');
+  card.setAttribute('role', 'article');
+  card.setAttribute('aria-label', 'Verdict ' + (result.verdict || '') + ' : ' + (result.claim || ''));
   card.dataset.claim = String(result.claim || '').toLowerCase().slice(0, 40);
   if (result.dominantSpeakerId !== null && result.dominantSpeakerId !== undefined) {
     card.dataset.speakerid = String(result.dominantSpeakerId);
@@ -872,8 +882,10 @@ function makeDraggable(panel) {
   document.addEventListener('mousemove', (e) => {
     if (!isDragging) return;
     panel.style.right = 'unset';
-    panel.style.left  = Math.max(0, startLeft + e.clientX - startX) + 'px';
-    panel.style.top   = Math.max(0, startTop  + e.clientY - startY) + 'px';
+    const maxLeft = Math.max(0, window.innerWidth  - panel.offsetWidth);
+    const maxTop  = Math.max(0, window.innerHeight - panel.offsetHeight);
+    panel.style.left = Math.min(maxLeft, Math.max(0, startLeft + e.clientX - startX)) + 'px';
+    panel.style.top  = Math.min(maxTop,  Math.max(0, startTop  + e.clientY - startY)) + 'px';
   });
   document.addEventListener('mouseup', () => { isDragging = false; header.style.cursor = 'grab'; });
 }

@@ -4,8 +4,8 @@
   position: fixed;
   top: 72px;
   right: 16px;
-  width: 320px;
-  max-height: 620px;
+  width: clamp(280px, 23vw, 380px);
+  max-height: min(620px, calc(100vh - 90px));
   background: rgba(15, 15, 15, 0.88);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
