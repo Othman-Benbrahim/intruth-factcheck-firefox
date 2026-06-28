@@ -46,8 +46,6 @@
     "https://api.crossref.org/*",
     "https://api.worldbank.org/*",
     "https://api.deepgram.com/*",
-    "https://fonts.googleapis.com/*",
-    "https://fonts.gstatic.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*"
   ],
@@ -82,7 +80,6 @@
         "https://www.dailymotion.com/*"
       ],
       "js": [
-        "src/content/lexical-features.js",
         "src/content/session-export.js",
         "src/content/overlay.js",
         "src/content/capture.js"
@@ -96,5 +93,27 @@
     "16": "assets/icon16.png",
     "48": "assets/icon48.png",
     "128": "assets/icon128.png"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/content/pcm-worklet.js"
+      ],
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://www.twitch.tv/*",
+        "https://x.com/*",
+        "https://twitter.com/*",
+        "https://www.facebook.com/*",
+        "https://web.facebook.com/*",
+        "https://rumble.com/*",
+        "https://kick.com/*",
+        "https://www.instagram.com/*",
+        "https://www.tiktok.com/*",
+        "https://bsky.app/*",
+        "https://odysee.com/*",
+        "https://www.dailymotion.com/*"
+      ]
+    }
+  ]
 }
