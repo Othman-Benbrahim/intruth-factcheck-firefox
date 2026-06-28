@@ -507,7 +507,8 @@ Return a JSON array using exactly this compact shape:
     "verdict": "TRUE | SUBSTANTIALLY TRUE | FALSE | MISLEADING | UNVERIFIABLE",
     "speaker": "identified speaker name or Unknown",
     "explanation": "one short sentence",
-    "confidence": 0.0
+    "confidence": 0.0,
+    "used_sources": []
   }
 ]
 
@@ -515,6 +516,7 @@ Rules:
 - Understand French and English directly.
 - Ignore opinions, jokes, filler, greetings, vague claims, and claims that cannot be checked.
 - Evaluate claims as they were made at the time of the recording when a date is provided.
+- "used_sources": when numbered sources are provided in the user message, list ONLY the numbers of the sources that directly support your verdict; exclude off-topic or unused ones. If no sources are provided or none are relevant, return [].
 `;
 
 // ── Speaker parsing (mirrors overlay.js) ─────────────────────────────────────
@@ -655,6 +657,71 @@ async function fetchWikidata(query) {
 }
 
 // ── GDELT — événements et actualité mondiale (sans clé) ───────────────────────
+
+// ── ESPN — résultats sportifs (sans clé, endpoints non officiels) ────────────
+// Précision priorisée : on ne renvoie un match que si une équipe citée dans
+// l'affirmation y figure (sinon rien — mieux vaut aucune source qu'une mauvaise).
+// Couvre les grandes ligues US + grands championnats de foot. Utilise la date de
+// la page quand elle est connue.
+
+const ESPN_LEAGUES = [
+  { re: /\b(nba|basket)\b/i,                            path: 'basketball/nba' },
+  { re: /\b(wnba)\b/i,                                  path: 'basketball/wnba' },
+  { re: /\b(nfl|super ?bowl|touchdown|quarterback)\b/i, path: 'football/nfl' },
+  { re: /\b(mlb|home run)\b/i,                          path: 'baseball/mlb' },
+  { re: /\b(nhl)\b/i,                                   path: 'hockey/nhl' },
+  { re: /\b(mls)\b/i,                                   path: 'soccer/usa.1' },
+  { re: /\b(premier league|chelsea|arsenal|liverpool|tottenham|manchester|man city|man united)\b/i, path: 'soccer/eng.1' },
+  { re: /\b(la liga|real madrid|barcel\w*|atl[ée]tico|s[ée]ville|sevilla)\b/i, path: 'soccer/esp.1' },
+  { re: /\b(ligue 1|psg|paris saint|marseille|monaco|lyon|lille|rennes|nice)\b/i, path: 'soccer/fra.1' },
+  { re: /\b(bundesliga|bayern|dortmund|leipzig|leverkusen)\b/i, path: 'soccer/ger.1' },
+  { re: /\b(serie a|juventus|\bjuve\b|milan|inter|naples|napoli|roma)\b/i, path: 'soccer/ita.1' },
+  { re: /\b(champions league|ligue des champions)\b/i, path: 'soccer/uefa.champions' },
+];
+
+function espnDateParam() {
+  if (!pageDate) return '';
+  const d = new Date(pageDate);
+  if (isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}${m}${day}`;
+}
+
+async function fetchEspn(query) {
+  const leagues = ESPN_LEAGUES.filter(l => l.re.test(query)).slice(0, 2);
+  if (!leagues.length) return [];
+  const dateParam = espnDateParam();
+  const claimWords = new Set((query.toLowerCase().match(/[\p{L}\d]{3,}/gu)) || []);
+  const out = [];
+  for (const lg of leagues) {
+    try {
+      const url = `https://site.api.espn.com/apis/site/v2/sports/${lg.path}/scoreboard` +
+        (dateParam ? `?dates=${dateParam}` : '');
+      const res = await fetch(url);
+      const data = await res.json().catch(() => ({}));
+      for (const ev of (data.events || [])) {
+        const comp = (ev.competitions && ev.competitions[0]) || {};
+        const cs = comp.competitors || [];
+        if (cs.length < 2) continue;
+        const teamsText = cs.map(c => `${c.team && c.team.displayName || ''} ${c.team && c.team.shortDisplayName || ''} ${c.team && c.team.abbreviation || ''}`).join(' ').toLowerCase();
+        if (![...claimWords].some(w => teamsText.includes(w))) continue; // précision : équipe citée requise
+        const score  = cs.map(c => `${c.team && (c.team.displayName || c.team.name) || '?'} ${c.score != null ? c.score : ''}`.trim()).join(' — ');
+        const status = (ev.status && ev.status.type && (ev.status.type.description || ev.status.type.shortDetail)) || '';
+        out.push({
+          source:  'espn',
+          title:   `ESPN — ${ev.shortName || ev.name || 'match'}`,
+          snippet: `${score} · ${status}${ev.date ? ' · ' + String(ev.date).slice(0, 10) : ''}`.replace(/\s+/g, ' ').trim(),
+          link:    (ev.links && ev.links[0] && ev.links[0].href) || url,
+        });
+      }
+    } catch (err) {
+      console.error('[espn] error:', err);
+    }
+  }
+  return out.slice(0, 4);
+}
 
 async function fetchGdelt(query) {
   try {
@@ -916,6 +983,7 @@ async function cachedSensor(sensor, q, fn) {
 // Évite de lancer 10 requêtes par phrase (et de se faire bannir).
 
 const SENSOR_KEYWORDS = {
+  sport:   /\b(match|matchs|championnat|tournoi|playoffs?|penalty|mi-temps|prolongation|carton rouge|carton jaune|corner|hat.?trick|touchdown|quarterback|home run|nba|nfl|mlb|nhl|mls|wnba|premier league|champions league|ligue des champions|ligue 1|la liga|bundesliga|serie a|super ?bowl|coupe du monde|world cup|roland.?garros|wimbledon|tour de france|ballon d.or|grand prix|formule ?1|formula ?1|real madrid|barcelone|barcelona|bar[çc]a|juventus|\bjuve\b|bayern|dortmund|liverpool|chelsea|arsenal|tottenham|atl[ée]tico|\bpsg\b|\bom\b|lakers|celtics|warriors|yankees|mbapp[ée]|messi|ronaldo|neymar|lebron|federer|nadal|djokovic)\b/i,
   health:  /\b(virus|vaccin\w*|sant[ée]|maladie|m[ée]dica\w*|clinique|patient|cancer|covid|[ée]pid[ée]mie|pand[ée]mie|\boms\b|th[ée]rapie|sympt[ôo]me|health|vaccine|disease|drug|clinical|\bwho\b)\b/i,
   economy: /\b(pib|inflation|dette|ch[ôo]mage|croissance|d[ée]ficit|budget|gdp|unemployment|debt|deficit|recession|economic)\b/i,
   geo:     /\b(ville|pays|r[ée]gion|fronti[èe]re|kilom[èe]tres?|\bkms?\b|capitale|continent|oc[ée]an|montagne|fleuve|border|city|country|located|capital|geograph\w*)\b/i,
@@ -924,8 +992,12 @@ const SENSOR_KEYWORDS = {
 
 function routeSensors(text) {
   const t = text || '';
-  // Socle général, toujours interrogé (sources généralistes peu coûteuses)
-  const sensors = new Set(['wikipedia', 'wikidata', 'gdelt']);
+  const isSport = SENSOR_KEYWORDS.sport.test(t);
+  // GDELT (presse) bruite les résultats sportifs → exclu pour le sport, où on lui
+  // substitue le capteur ESPN (scores structurés).
+  const sensors = new Set(['wikipedia', 'wikidata']);
+  if (!isSport) sensors.add('gdelt');
+  if (isSport)  sensors.add('espn');
   if (SENSOR_KEYWORDS.health.test(t))  { sensors.add('europepmc'); sensors.add('crossref'); }
   if (SENSOR_KEYWORDS.science.test(t)) { sensors.add('openalex');  sensors.add('crossref'); }
   if (SENSOR_KEYWORDS.economy.test(t)) { sensors.add('worldbank'); }
@@ -960,6 +1032,7 @@ function buildEvidenceText(items) {
     s === 'crossref'    ? 'Publication (Crossref)' :
     s === 'worldbank'   ? 'Banque Mondiale' :
     s === 'nominatim'   ? 'Géo (OpenStreetMap)' :
+    s === 'espn'        ? 'Résultat sportif (ESPN)' :
     s === 'factcheck'   ? 'Fact-check existant' : 'Source';
   return items.map((it, i) => {
     let domain = '';
@@ -984,6 +1057,7 @@ async function gatherEvidence(queries) {
   if (sensors.has('wikipedia')) tasks.push(cachedSensor('wikipedia', q0, () => searchWikipedia(q0)));
   if (sensors.has('wikidata'))  tasks.push(cachedSensor('wikidata',  q0, () => fetchWikidata(q0)));
   if (sensors.has('gdelt'))     tasks.push(cachedSensor('gdelt',     q0, () => fetchGdelt(q0)));
+  if (sensors.has('espn'))      tasks.push(cachedSensor('espn',      q0, () => fetchEspn(q0)));
   if (sensors.has('europepmc')) tasks.push(cachedSensor('europepmc', q0, () => fetchEuropePmc(q0)));
   if (sensors.has('openalex'))  tasks.push(cachedSensor('openalex',  q0, () => fetchOpenAlex(q0)));
   if (sensors.has('crossref'))  tasks.push(cachedSensor('crossref',  q0, () => fetchCrossref(q0)));
@@ -2170,6 +2244,44 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
   }
 }
 
+// ── Sélection des sources réellement pertinentes pour le verdict ─────────────
+function relevanceFilterItems(claim, items) {
+  const list = Array.isArray(items) ? items : [];
+  const claimWords = new Set(String(claim || '').toLowerCase().match(/[\p{L}\d]{4,}/gu) || []);
+  if (!claimWords.size) return list.slice(0, 3);
+  const scored = list.map(it => {
+    const text = ((it.title || '') + ' ' + (it.snippet || '')).toLowerCase();
+    const words = new Set(text.match(/[\p{L}\d]{4,}/gu) || []);
+    let overlap = 0;
+    for (const w of claimWords) if (words.has(w)) overlap++;
+    return { it, overlap };
+  });
+  let kept = scored.filter(x => x.overlap >= 2);
+  if (!kept.length) kept = scored.filter(x => x.overlap >= 1);
+  kept.sort((a, b) => b.overlap - a.overlap);
+  return kept.map(x => x.it);
+}
+
+function selectCitedSources(match, evidence, claim, cap) {
+  cap = cap || 4;
+  const items = (evidence && evidence.items) || [];
+  let chosen = [];
+  if (match && Array.isArray(match.used_sources)) {
+    chosen = match.used_sources
+      .map(n => parseInt(n, 10))
+      .filter(n => Number.isInteger(n) && n >= 1 && n <= items.length)
+      .map(n => items[n - 1]);
+  }
+  if (!chosen.length) chosen = relevanceFilterItems(claim, items);
+  const seen = new Set();
+  const out = [];
+  for (const it of chosen) {
+    if (it && it.link && !seen.has(it.link)) { seen.add(it.link); out.push(it.link); }
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
 async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, lexicalSnapshot, dominantSpeaker, dominantSpeakerId) {
   try {
     const dateCtx      = pageDate ? `\nDate: ${pageDate}` : '';
@@ -2189,6 +2301,12 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
         ].filter(Boolean))].slice(0, 3);
         const urlGroups = await gatherEvidence(searchQueries);
         const urls = urlGroups.sources;
+        let safeUrls = relevanceFilterItems(fastResult.claim, urlGroups.items).slice(0, 4).map(it => it.link);
+        if (!safeUrls.length) safeUrls = urls.slice(0, 4);
+        const isSport = SENSOR_KEYWORDS.sport.test(fastResult.claim || '');
+        const sportCaution = isSport
+          ? "\n\nIMPORTANT — résultat sportif : n'affirme un score, un vainqueur ou une statistique chiffrée que si une source ci-dessus le confirme explicitement. En l'absence de confirmation, réponds UNVERIFIABLE plutôt que de deviner."
+          : "";
         if (!urls.length) {
           // La recherche web est indisponible ou n'a rien trouvé : on clôt le verdict rapide
           // au lieu de laisser l'interface bloquée en état pending.
@@ -2202,7 +2320,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
           };
         }
         const raw = await callLLM(
-          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nSources (web, encyclopédies, bases scientifiques/médicales, données officielles, actualité, fact-checks déjà publiés) — base ton verdict sur ces éléments. Accorde un poids fort aux données officielles (Banque Mondiale), au consensus scientifique et aux fact-checks d'organismes reconnus ; un article signalé « RÉTRACTÉ » ne doit pas servir de preuve à charge ou à décharge :\n${urlGroups.text}${lexicalContext}`,
+          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nSources (web, encyclopédies, bases scientifiques/médicales, données officielles, actualité, fact-checks déjà publiés) — base ton verdict sur ces éléments. Accorde un poids fort aux données officielles (Banque Mondiale), au consensus scientifique et aux fact-checks d'organismes reconnus ; un article signalé « RÉTRACTÉ » ne doit pas servir de preuve à charge ou à décharge.\n\nRenseigne le champ "used_sources" avec les numéros des sources ci-dessous réellement utilisées pour ce verdict (exclus les sources hors-sujet ; [] si aucune n’est pertinente) :\n${urlGroups.text}${lexicalContext}${sportCaution}`,
           EVALUATE_PROMPT
         );
         const parsed = parseArrayWithDiagnostics(raw);
@@ -2213,7 +2331,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
             'llm',
             { fatal: false }
           );
-          return { ...fastResult, sources: urls, pending: false, lexical: lexicalSnapshot, speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
+          return { ...fastResult, sources: safeUrls, pending: false, lexical: lexicalSnapshot, speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
         }
 
         const results = normalizeVerdictResults(parsed.results);
@@ -2225,7 +2343,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
             'llm',
             { fatal: false }
           );
-          return { ...fastResult, sources: urls, pending: false, lexical: lexicalSnapshot, speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
+          return { ...fastResult, sources: safeUrls, pending: false, lexical: lexicalSnapshot, speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
         }
         const lateResolved = dominantSpeakerId !== null && dominantSpeakerId !== undefined
           ? speakerIdToName[dominantSpeakerId] || null
@@ -2239,7 +2357,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
         const groundedIsMisleading = match.verdict === 'MISLEADING';
         const finalVerdict = (fastWasTrue && groundedIsMisleading) ? fastResult.verdict : match.verdict;
 
-        return { ...match, verdict: finalVerdict, sources: urls, pending: false, lexical: lexicalSnapshot, speaker: resolvedSpeaker, dominantSpeakerId };
+        return { ...match, verdict: finalVerdict, sources: selectCitedSources(match, urlGroups, fastResult.claim), pending: false, lexical: lexicalSnapshot, speaker: resolvedSpeaker, dominantSpeakerId };
       } catch (err) {
         console.error('[grounded] error:', fastResult.claim.slice(0, 40), err);
         return null;
