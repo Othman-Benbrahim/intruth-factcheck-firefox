@@ -2,7 +2,7 @@
   "manifest_version": 4,
   "name": "InTruth",
   "version": "1.5.0",
-  "description": "Extension Firefox de fact-checking en temps réel à partir de la transcription audio",
+  "description": "Extension Firefox de fact-checking en temps r\u00e9el \u00e0 partir de la transcription audio",
   "browser_specific_settings": {
     "gecko": {
       "id": "intruth@othmanbenbrahim.dev",
@@ -40,6 +40,7 @@
     "https://*.wikipedia.org/*",
     "https://www.wikidata.org/*",
     "https://api.gdeltproject.org/*",
+    "https://site.api.espn.com/*",
     "https://nominatim.openstreetmap.org/*",
     "https://www.ebi.ac.uk/*",
     "https://api.openalex.org/*",
