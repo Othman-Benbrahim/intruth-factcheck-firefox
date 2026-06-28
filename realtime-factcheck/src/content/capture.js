@@ -10,12 +10,12 @@
 
 const capBrowserAPI = (typeof browser !== 'undefined') ? browser : chrome;
 
-let capStream    = null;
-let capAudioCtx  = null;
-let capSource    = null;
-let capProcessor = null;
-let capGain      = null;
-let capRunning   = false;
+let capStream      = null;
+let capAudioCtx    = null;
+let capSource      = null;
+let capWorkletNode = null;
+let capGain        = null;
+let capRunning     = false;
 
 function capFindPanel() {
   return document.getElementById('rtfc-panel');
@@ -125,22 +125,33 @@ async function capStart() {
     try { await capAudioCtx.resume(); } catch (e) {}
   }
 
-  capSource    = capAudioCtx.createMediaStreamSource(capStream);
-  capProcessor = capAudioCtx.createScriptProcessor(4096, 1, 1);
-  capGain      = capAudioCtx.createGain();
+  capSource = capAudioCtx.createMediaStreamSource(capStream);
+  capGain   = capAudioCtx.createGain();
   capGain.gain.value = 0; // graphe maintenu actif mais SILENCIEUX (pas de larsen)
 
-  capProcessor.onaudioprocess = (e) => {
-    const float32 = e.inputBuffer.getChannelData(0);
-    const int16 = new Int16Array(float32.length);
-    for (let i = 0; i < float32.length; i++) {
-      int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-    }
-    capBrowserAPI.runtime.sendMessage({ type: 'AUDIO_CHUNK', chunk: int16.buffer }).catch(() => {});
+  // Charge le processeur audio depuis un FICHIER (via runtime.getURL) : déclaré en
+  // web_accessible_resources, ce chargement contourne la CSP des sites tiers.
+  try {
+    await capAudioCtx.audioWorklet.addModule(
+      capBrowserAPI.runtime.getURL('src/content/pcm-worklet.js')
+    );
+  } catch (err) {
+    capBrowserAPI.runtime.sendMessage({
+      type: 'CAPTURE_ERROR',
+      message: 'Échec du chargement du module audio : ' + err.message,
+    }).catch(() => {});
+    capStop();
+    return;
+  }
+
+  capWorkletNode = new AudioWorkletNode(capAudioCtx, 'rtfc-pcm-processor');
+  capWorkletNode.port.onmessage = (e) => {
+    // e.data = ArrayBuffer PCM Int16 (même format que l'ancien chunk)
+    capBrowserAPI.runtime.sendMessage({ type: 'AUDIO_CHUNK', chunk: e.data }).catch(() => {});
   };
 
-  capSource.connect(capProcessor);
-  capProcessor.connect(capGain);
+  capSource.connect(capWorkletNode);
+  capWorkletNode.connect(capGain);
   capGain.connect(capAudioCtx.destination);
 
   // Si l'utilisateur coupe le périphérique / la piste se termine
@@ -157,10 +168,10 @@ async function capStart() {
 function capStop() {
   capRunning = false;
 
-  if (capProcessor) {
-    try { capProcessor.disconnect(); } catch (e) {}
-    capProcessor.onaudioprocess = null;
-    capProcessor = null;
+  if (capWorkletNode) {
+    try { capWorkletNode.disconnect(); } catch (e) {}
+    if (capWorkletNode.port) capWorkletNode.port.onmessage = null;
+    capWorkletNode = null;
   }
   if (capSource) { try { capSource.disconnect(); } catch (e) {} capSource = null; }
   if (capGain)   { try { capGain.disconnect();   } catch (e) {} capGain = null; }
