@@ -57,7 +57,7 @@ const LLM_ANALYSIS_MAX_TOKENS = 1400;
 // une réponse vide / tronquée.
 const LLM_REASONING_MAX_TOKENS = 6000;
 const LLM_REASONING_VALIDATION_TOKENS = 2048;
-const LLM_MAX_CLAIMS_PER_BATCH = 1;
+const LLM_MAX_CLAIMS_PER_BATCH = 3;
 const LLM_BATCH_CHAR_LIMIT = 900;
 const LLM_MAX_BATCHES_PER_WINDOW = 4;
 
@@ -499,8 +499,8 @@ Return ONLY valid JSON.
 No Markdown. No code fences. No comments. No text before or after JSON.
 
 Important anti-truncation rules:
-- Return at most ${LLM_MAX_CLAIMS_PER_BATCH} factual claim per response.
-- Prefer the clearest, most checkable claim.
+- Return at most ${LLM_MAX_CLAIMS_PER_BATCH} factual claims per response.
+- Prioritize the most checkable, verifiable claims.
 - Keep all fields short.
 - If there is no clear factual claim, return [].
 - Do not include long quotes from the transcript.
@@ -2333,6 +2333,149 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
 }
 
 // ── Sélection des sources réellement pertinentes pour le verdict ─────────────
+// ── Indépendance des sources + corroboration (déterministe, 0 appel LLM) ──────
+// Inspiré d'au-crible : on compte des VOIX indépendantes (pas des URL) et on
+// démasque le reporting circulaire (verbatim / quasi-verbatim). 100 % JS pur,
+// testable hors-ligne. Ne remplace jamais le verdict du modèle : il le calibre.
+
+const CORRO_MULTI_TLD = new Set([
+  'co.uk','org.uk','gov.uk','ac.uk','me.uk','co.jp','or.jp','ne.jp',
+  'com.au','net.au','org.au','gov.au','edu.au','co.nz','com.br','gov.br',
+  'co.in','gov.in','com.mx','co.za','com.tr','com.cn','gov.cn',
+]);
+
+function registrableDomain(hostname) {
+  const h = String(hostname || '').replace(/^www\./, '').toLowerCase();
+  const parts = h.split('.');
+  if (parts.length <= 2) return h;
+  const lastTwo = parts.slice(-2).join('.');
+  const lastThree = parts.slice(-3).join('.');
+  return CORRO_MULTI_TLD.has(lastTwo) ? lastThree : lastTwo;
+}
+
+function domainOfLink(link) {
+  try { return registrableDomain(new URL(link).hostname); }
+  catch { return String(link || ''); }
+}
+
+function normalizeForShingles(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function wordShingles(text, n) {
+  n = n || 3;
+  const tokens = normalizeForShingles(text).split(' ').filter(Boolean);
+  const set = new Set();
+  if (tokens.length < n) { if (tokens.length) set.add(tokens.join(' ')); return set; }
+  for (let i = 0; i <= tokens.length - n; i++) set.add(tokens.slice(i, i + n).join(' '));
+  return set;
+}
+
+function jaccardSim(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+// Crédibilité par TYPE de capteur (signaux, jamais réputation média). 0..1.
+const SOURCE_CREDIBILITY = {
+  worldbank: 1.0, crossref: 0.95, openalex: 0.9, europepmc: 0.9,
+  factcheck: 0.85, espn: 0.85, wikidata: 0.75, wikipedia: 0.7,
+  gdelt: 0.5, web: 0.5,
+};
+function sourceCredibility(src) {
+  return SOURCE_CREDIBILITY[src] != null ? SOURCE_CREDIBILITY[src] : 0.5;
+}
+
+// Sources « primaires / officielles » : leur seule présence sort de FAIBLE.
+const CORRO_PRIMARY = new Set(['worldbank', 'crossref', 'openalex', 'europepmc', 'factcheck']);
+
+// Union-find : deux items dans la même voix si même domaine OU quasi-doublon lexical.
+function clusterEvidence(items, threshold) {
+  threshold = (typeof threshold === 'number') ? threshold : 0.5;
+  const list = Array.isArray(items) ? items : [];
+  const n = list.length;
+  if (!n) return [];
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (x) => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+  const union = (a, b) => { parent[find(a)] = find(b); };
+  const domains  = list.map(it => domainOfLink(it.link));
+  const shingles = list.map(it => wordShingles(`${it.title || ''} ${it.snippet || ''}`));
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (domains[i] === domains[j] || jaccardSim(shingles[i], shingles[j]) > threshold) union(i, j);
+    }
+  }
+  const groups = new Map();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(list[i]);
+  }
+  return [...groups.values()];
+}
+
+// Score de corroboration : voix indépendantes + présence de primaires + circulaire.
+// Mesure la ROBUSTESSE de l'étayage (pas le « pour/contre » : ça exigerait un appel
+// LLM de classification qu'on évite volontairement).
+function computeCorroboration(items, threshold) {
+  const clusters = clusterEvidence(items, threshold);
+  const voices = clusters.length;
+  let primaries = 0, circular = false, weighted = 0;
+  for (const members of clusters) {
+    let best = 0;
+    for (const m of members) best = Math.max(best, sourceCredibility(m.source));
+    weighted += best;
+    if (members.some(m => CORRO_PRIMARY.has(m.source))) primaries++;
+    if (members.length >= 3) circular = true;
+  }
+  let band;
+  if (voices === 0)                        band = 'INSUFFISANTE';
+  else if (primaries >= 1 && voices >= 2)  band = 'SOLIDE';
+  else if (primaries >= 1 || voices >= 2)  band = 'MODÉRÉE';
+  else                                     band = 'FAIBLE';
+  return { voices, primaries, circular, weighted: Math.round(weighted * 100) / 100, band };
+}
+
+// Contexte injecté dans le prompt sourcé (additif, comme la prudence sport).
+function buildCorroborationContext(c) {
+  if (!c) return '';
+  const bits = [`${c.voices} voix indépendante${c.voices > 1 ? 's' : ''}`];
+  if (c.primaries > 0) bits.push(`dont ${c.primaries} primaire/officielle${c.primaries > 1 ? 's' : ''}`);
+  if (c.circular) bits.push("reporting circulaire détecté (reprises d'une même source)");
+  let instr = '';
+  if (c.band === 'INSUFFISANTE')
+    instr = " Corroboration indépendante insuffisante : réponds UNVERIFIABLE sauf preuve explicite ci-dessus.";
+  else if (c.band === 'FAIBLE')
+    instr = " Corroboration faible (source unique) : n'attribue pas une confiance élevée.";
+  return `\n\nCorroboration (indices, déterministe) : ${bits.join(', ')} — robustesse ${c.band}.${instr}`;
+}
+
+// Garde-fou : ne JAMAIS gonfler ; seulement plafonner/abaisser sur preuve mince.
+// INSUFFISANTE (aucune voix crédible sur le sujet) -> UNVERIFIABLE + confiance basse.
+// FAIBLE (une seule voix générique) -> confiance plafonnée, verdict inchangé.
+function applyCorroborationGuard(verdict, confidence, c) {
+  if (!c) return { verdict, confidence };
+  const num = Number(confidence);
+  const hasNum = Number.isFinite(num);
+  if (c.band === 'INSUFFISANTE') {
+    return {
+      verdict: (verdict && verdict !== 'UNVERIFIABLE') ? 'UNVERIFIABLE' : verdict,
+      confidence: hasNum ? Math.min(num, 0.3) : 0.3,
+    };
+  }
+  if (c.band === 'FAIBLE') {
+    return { verdict, confidence: hasNum ? Math.min(num, 0.4) : confidence };
+  }
+  return { verdict, confidence };
+}
+
 function relevanceFilterItems(claim, items) {
   const list = Array.isArray(items) ? items : [];
   const claimWords = new Set(String(claim || '').toLowerCase().match(/[\p{L}\d]{4,}/gu) || []);
@@ -2395,6 +2538,9 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
         const sportCaution = isSport
           ? "\n\nIMPORTANT — résultat sportif : n'affirme un score, un vainqueur ou une statistique chiffrée que si une source ci-dessus le confirme explicitement. En l'absence de confirmation, réponds UNVERIFIABLE plutôt que de deviner."
           : "";
+        const corrobItems   = relevanceFilterItems(fastResult.claim, urlGroups.items);
+        const corroboration = computeCorroboration(corrobItems);
+        const corrobContext = buildCorroborationContext(corroboration);
         if (!urls.length) {
           // La recherche web est indisponible ou n'a rien trouvé : on clôt le verdict rapide
           // au lieu de laisser l'interface bloquée en état pending.
@@ -2408,7 +2554,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
           };
         }
         const raw = await callLLM(
-          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nSources (web, encyclopédies, bases scientifiques/médicales, données officielles, actualité, fact-checks déjà publiés) — base ton verdict sur ces éléments. Accorde un poids fort aux données officielles (Banque Mondiale), au consensus scientifique et aux fact-checks d'organismes reconnus ; un article signalé « RÉTRACTÉ » ne doit pas servir de preuve à charge ou à décharge.\n\nRenseigne le champ "used_sources" avec les numéros des sources ci-dessous réellement utilisées pour ce verdict (exclus les sources hors-sujet ; [] si aucune n’est pertinente) :\n${urlGroups.text}${lexicalContext}${sportCaution}`,
+          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nSources (web, encyclopédies, bases scientifiques/médicales, données officielles, actualité, fact-checks déjà publiés) — base ton verdict sur ces éléments. Accorde un poids fort aux données officielles (Banque Mondiale), au consensus scientifique et aux fact-checks d'organismes reconnus ; un article signalé « RÉTRACTÉ » ne doit pas servir de preuve à charge ou à décharge.\n\nRenseigne le champ "used_sources" avec les numéros des sources ci-dessous réellement utilisées pour ce verdict (exclus les sources hors-sujet ; [] si aucune n’est pertinente) :\n${urlGroups.text}${lexicalContext}${sportCaution}${corrobContext}`,
           EVALUATE_PROMPT
         );
         const parsed = parseArrayWithDiagnostics(raw);
@@ -2445,7 +2591,8 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
         const groundedIsMisleading = match.verdict === 'MISLEADING';
         const finalVerdict = (fastWasTrue && groundedIsMisleading) ? fastResult.verdict : match.verdict;
 
-        return { ...match, verdict: finalVerdict, sources: selectCitedSources(match, urlGroups, fastResult.claim), pending: false, lexical: lexicalSnapshot, speaker: resolvedSpeaker, dominantSpeakerId };
+        const guarded = applyCorroborationGuard(finalVerdict, match.confidence, corroboration);
+        return { ...match, verdict: guarded.verdict, confidence: guarded.confidence, corroboration, sources: selectCitedSources(match, urlGroups, fastResult.claim), pending: false, lexical: lexicalSnapshot, speaker: resolvedSpeaker, dominantSpeakerId };
       } catch (err) {
         console.error('[grounded] error:', fastResult.claim.slice(0, 40), err);
         return null;
