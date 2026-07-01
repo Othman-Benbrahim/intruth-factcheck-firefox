@@ -1976,6 +1976,19 @@ function extractLexical(text) {
   };
 }
 
+// Conviction du locuteur (déterministe, depuis les features lexicales).
+// Reflète commitmentFromLexical de l'overlay : ASSERTIF->HIGH, PRUDENT->LOW, sinon MEDIUM.
+function speakerConfidenceFromLexical(lexical) {
+  const r = lexical && lexical.rates;
+  if (!r) return null;
+  if ((lexical.wordCount || 0) < 5) return null;
+  const assertive = (r.certainty || 0) + (r.emotional || 0) * 0.5;
+  const hedged    = (r.hedging   || 0) + (r.exclusive || 0) * 0.5 + (r.filler || 0) * 0.3;
+  if (assertive - hedged >= 5) return 'HIGH';
+  if (hedged - assertive >= 5) return 'LOW';
+  return 'MEDIUM';
+}
+
 function buildLexicalSummary(f) {
   const r = f.rates || f;
   const notes = [];
@@ -2316,6 +2329,7 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
           sources:          [],
           pending:          true,
           lexical:          lexicalSnapshot,
+          speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot),
           dominantSpeakerId,
           speaker:          dominantSpeaker || (r.speaker && !r.speaker.match(/^Speaker\s*\d+$/i) ? r.speaker : null),
         })),
@@ -2549,6 +2563,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
             sources: [],
             pending: false,
             lexical: lexicalSnapshot,
+            speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot),
             speaker: dominantSpeaker || (fastResult.speaker && !fastResult.speaker.match(/^Speaker\s*\d+$/i) ? fastResult.speaker : null),
             dominantSpeakerId,
           };
@@ -2565,7 +2580,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
             'llm',
             { fatal: false }
           );
-          return { ...fastResult, sources: safeUrls, pending: false, lexical: lexicalSnapshot, speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
+          return { ...fastResult, sources: safeUrls, pending: false, lexical: lexicalSnapshot, speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot), speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
         }
 
         const results = normalizeVerdictResults(parsed.results);
@@ -2577,7 +2592,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
             'llm',
             { fatal: false }
           );
-          return { ...fastResult, sources: safeUrls, pending: false, lexical: lexicalSnapshot, speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
+          return { ...fastResult, sources: safeUrls, pending: false, lexical: lexicalSnapshot, speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot), speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
         }
         const lateResolved = dominantSpeakerId !== null && dominantSpeakerId !== undefined
           ? speakerIdToName[dominantSpeakerId] || null
@@ -2592,7 +2607,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
         const finalVerdict = (fastWasTrue && groundedIsMisleading) ? fastResult.verdict : match.verdict;
 
         const guarded = applyCorroborationGuard(finalVerdict, match.confidence, corroboration);
-        return { ...match, verdict: guarded.verdict, confidence: guarded.confidence, corroboration, sources: selectCitedSources(match, urlGroups, fastResult.claim), pending: false, lexical: lexicalSnapshot, speaker: resolvedSpeaker, dominantSpeakerId };
+        return { ...match, verdict: guarded.verdict, confidence: guarded.confidence, corroboration, sources: selectCitedSources(match, urlGroups, fastResult.claim), pending: false, lexical: lexicalSnapshot, speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot), speaker: resolvedSpeaker, dominantSpeakerId };
       } catch (err) {
         console.error('[grounded] error:', fastResult.claim.slice(0, 40), err);
         return null;
