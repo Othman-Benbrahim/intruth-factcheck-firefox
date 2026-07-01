@@ -18,7 +18,10 @@ let LLM_ENDPOINT = '';            // base URL compatible OpenAI, ex. http://loca
 let LLM_MODEL    = '';            // identifiant du modèle
 let LLM_REASONING = false;        // true si modèle "reasoning" (o-series, R1…)
 let DEEPGRAM_KEY = '';
-const SERPER_KEY = '';
+let SEARCH_PROVIDER = 'exa';   // recherche web enfichable : 'exa' | 'tavily' | 'serper' | 'none'
+let EXA_KEY      = '';
+let TAVILY_KEY   = '';
+let SERPER_KEY   = '';
 let FACTCHECK_KEY = '';           // clé Google Fact Check Tools (facultative, BYOK)
 
 const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
@@ -463,13 +466,14 @@ async function loadKeys() {
   // browser.storage renvoie une Promise sous Firefox (pas de callback).
   const local = await browserAPI.storage.local.get([
     'deepgramKey', 'llmProvider', 'llmApiKey', 'llmEndpoint', 'llmModel', 'llmReasoning', 'anthropicKey', 'factCheckKey',
+    'searchProvider', 'exaKey', 'tavilyKey', 'serperKey',
   ]);
   // Si la mémorisation est désactivée, les clés sont en storage.session
   // (mémoire de session, non écrite sur le disque). On lit les deux, la
   // session étant prioritaire pour les valeurs secrètes.
   let session = {};
   try {
-    session = await browserAPI.storage.session.get(['deepgramKey', 'llmApiKey', 'llmEndpoint', 'llmModel', 'factCheckKey']);
+    session = await browserAPI.storage.session.get(['deepgramKey', 'llmApiKey', 'llmEndpoint', 'llmModel', 'factCheckKey', 'exaKey', 'tavilyKey', 'serperKey']);
   } catch (_) { session = {}; }
   const pick = (k) => (session && session[k] !== undefined && session[k] !== '') ? session[k] : local[k];
 
@@ -481,6 +485,10 @@ async function loadKeys() {
   LLM_REASONING = local.llmReasoning === true;
   // rétro-compatibilité : si une ancienne clé Anthropic existe, on la réutilise
   LLM_API_KEY   = (pick('llmApiKey') || local.anthropicKey || '').trim();
+  SEARCH_PROVIDER = local.searchProvider || 'exa';
+  EXA_KEY    = (pick('exaKey')    || '').trim();
+  TAVILY_KEY = (pick('tavilyKey') || '').trim();
+  SERPER_KEY = (pick('serperKey') || '').trim();
 }
 
 const EVALUATE_PROMPT = `
@@ -567,7 +575,87 @@ const CONTACT_EMAIL = 'intruth@othmanbenbrahim.dev';
 
 // ── Web (Serper) ──────────────────────────────────────────────────────────────
 
+// ── Recherche web enfichable (Exa / Tavily / Serper, BYOK) ───────────────────
+// Tous renvoient la même forme { source:'web', title, snippet, link } : transparent
+// pour le reste du pipeline (crédibilité, citations, corroboration, dissonance).
+
 async function searchWeb(query, retries = 2) {
+  if (SEARCH_PROVIDER === 'exa'    && EXA_KEY)    return searchExa(query);
+  if (SEARCH_PROVIDER === 'tavily' && TAVILY_KEY) return searchTavily(query);
+  if (SEARCH_PROVIDER === 'serper' && SERPER_KEY) return searchSerper(query, retries);
+  // repli : n'importe quelle clé présente (ordre Exa > Tavily > Serper)
+  if (EXA_KEY)    return searchExa(query);
+  if (TAVILY_KEY) return searchTavily(query);
+  if (SERPER_KEY) return searchSerper(query, retries);
+  return [];
+}
+
+// Exa — recherche neuronale (en-tête x-api-key). type 'auto' = toujours dispo ;
+// passer à 'fast' (~450 ms) ou 'instant' (~250 ms) pour réduire la latence.
+const EXA_SEARCH_TYPE = 'auto';
+async function searchExa(query) {
+  try {
+    const res = await fetch('https://api.exa.ai/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': EXA_KEY },
+      body: JSON.stringify({
+        query,
+        type: EXA_SEARCH_TYPE,
+        numResults: 6,
+        contents: { highlights: true, text: { maxCharacters: 600 } },
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    return (data.results ?? [])
+      .map(r => {
+        const hi = Array.isArray(r.highlights) ? r.highlights.join(' ') : '';
+        const body = hi || (typeof r.text === 'string' ? r.text : '');
+        return {
+          source:  'web',
+          title:   (r.title || '').trim(),
+          snippet: (body || '').replace(/\s+/g, ' ').trim().slice(0, 600),
+          link:    r.url || '',
+        };
+      })
+      .filter(r => r.link && !BLOCKED_DOMAINS.some(d => r.link.includes(d)))
+      .slice(0, 4);
+  } catch (err) {
+    console.error('[exa] error:', err);
+    return [];
+  }
+}
+
+// Tavily — recherche orientée LLM (clé dans le corps, comme dans au-crible).
+async function searchTavily(query) {
+  try {
+    const res = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: TAVILY_KEY,
+        query,
+        max_results: 6,
+        search_depth: 'basic',
+        include_answer: false,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    return (data.results ?? [])
+      .map(r => ({
+        source:  'web',
+        title:   (r.title || '').trim(),
+        snippet: (r.content || '').replace(/\s+/g, ' ').trim().slice(0, 600),
+        link:    r.url || '',
+      }))
+      .filter(r => r.link && !BLOCKED_DOMAINS.some(d => r.link.includes(d)))
+      .slice(0, 4);
+  } catch (err) {
+    console.error('[tavily] error:', err);
+    return [];
+  }
+}
+
+async function searchSerper(query, retries = 2) {
   if (!SERPER_KEY) return []; // pas de clé Serper → on s'appuie sur les autres capteurs
   try {
     const res = await fetch('https://google.serper.dev/search', {
@@ -588,7 +676,7 @@ async function searchWeb(query, retries = 2) {
   } catch (err) {
     if (retries > 0) {
       await new Promise(r => setTimeout(r, 500));
-      return searchWeb(query, retries - 1);
+      return searchSerper(query, retries - 1);
     }
     console.error('[serper] error:', err);
     return [];
@@ -1051,7 +1139,7 @@ async function gatherEvidence(queries) {
   const sensors = routeSensors(routeText);
   const tasks = [];
 
-  if (sensors.has('web') && SERPER_KEY) {
+  if (sensors.has('web') && (EXA_KEY || TAVILY_KEY || SERPER_KEY)) {
     for (const q of queries) tasks.push(cachedSensor('web', q, () => searchWeb(q)));
   }
   if (sensors.has('wikipedia')) tasks.push(cachedSensor('wikipedia', q0, () => searchWikipedia(q0)));
