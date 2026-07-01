@@ -13,6 +13,10 @@ const apiKeyEl     = document.getElementById('llmApiKey');
 const apiKeyLabel  = document.getElementById('apiKeyLabel');
 const deepgramEl   = document.getElementById('deepgramKey');
 const factCheckEl  = document.getElementById('factCheckKey');
+const searchProviderEl = document.getElementById('searchProvider');
+const searchApiKeyEl   = document.getElementById('searchApiKey');
+const searchKeyLabel   = document.getElementById('searchKeyLabel');
+const searchKeyField   = document.getElementById('searchKeyField');
 const reasoningEl  = document.getElementById('llmReasoning');
 const reasoningField = document.getElementById('reasoningField');
 const rememberEl   = document.getElementById('rememberKeys');
@@ -30,7 +34,30 @@ let lastValidation = { state: 'idle', ok: null, message: 'Validation non lancée
 const RUNTIME_ERROR_KEYS = ['rtfcLastPipelineError', 'rtfcLastPipelineErrorAt'];
 
 // Clés "coordonnées" persistées selon le choix de mémorisation.
-const SECRET_KEYS = ['llmEndpoint', 'llmModel', 'llmApiKey', 'deepgramKey', 'factCheckKey'];
+const SECRET_KEYS = ['llmEndpoint', 'llmModel', 'llmApiKey', 'deepgramKey', 'factCheckKey', 'exaKey', 'tavilyKey', 'serperKey'];
+
+// Recherche web : une clé par provider, mémorisée séparément ; un seul champ affiché.
+const SEARCH_KEY_STORAGE = { exa: 'exaKey', tavily: 'tavilyKey', serper: 'serperKey' };
+const searchKeys = { exaKey: '', tavilyKey: '', serperKey: '' };
+function searchStorageKey() { return SEARCH_KEY_STORAGE[searchProviderEl ? searchProviderEl.value : 'exa']; }
+function syncSearchInput() {
+  const k = searchStorageKey();
+  if (k && searchApiKeyEl) searchKeys[k] = searchApiKeyEl.value.trim();
+}
+function applySearchUI() {
+  if (!searchProviderEl) return;
+  const p = searchProviderEl.value;
+  const k = SEARCH_KEY_STORAGE[p];
+  if (searchKeyField) searchKeyField.style.display = (p === 'none') ? 'none' : 'flex';
+  if (k && searchApiKeyEl) {
+    searchApiKeyEl.value = searchKeys[k] || '';
+    searchApiKeyEl.classList.toggle('saved', Boolean(searchApiKeyEl.value));
+  }
+  if (searchKeyLabel) searchKeyLabel.textContent =
+    p === 'exa' ? 'Clé Exa' : p === 'tavily' ? 'Clé Tavily' : p === 'serper' ? 'Clé Serper' : 'Clé de recherche';
+  if (searchApiKeyEl) searchApiKeyEl.placeholder =
+    p === 'exa' ? 'Clé API Exa...' : p === 'tavily' ? 'tvly-...' : p === 'serper' ? 'Clé API Serper...' : '';
+}
 
 function rememberEnabled() { return !rememberEl || rememberEl.checked; }
 
@@ -47,12 +74,16 @@ function persistKeys(obj) {
 }
 
 function collectSecretKeys() {
+  syncSearchInput();
   return {
     llmEndpoint: endpointEl.value.trim(),
     llmModel:    modelEl.value.trim(),
     llmApiKey:   apiKeyEl.value.trim(),
     deepgramKey: deepgramEl.value.trim(),
     factCheckKey: factCheckEl ? factCheckEl.value.trim() : '',
+    exaKey:    searchKeys.exaKey || '',
+    tavilyKey: searchKeys.tavilyKey || '',
+    serperKey: searchKeys.serperKey || '',
   };
 }
 
@@ -61,6 +92,7 @@ function collectSecretKeys() {
 function saveAllForStart() {
   chrome.storage.local.set({
     llmProvider: providerEl.value,
+    searchProvider: searchProviderEl ? searchProviderEl.value : 'exa',
     llmReasoning: reasoningEl ? reasoningEl.checked : false,
     rememberKeys: rememberEnabled(),
   });
@@ -85,6 +117,7 @@ function saveAllForStart() {
 
 chrome.storage.local.get(
   ['llmProvider', 'llmEndpoint', 'llmModel', 'llmApiKey', 'anthropicKey', 'deepgramKey', 'factCheckKey',
+   'searchProvider', 'exaKey', 'tavilyKey', 'serperKey',
    'llmReasoning', 'rememberKeys', ...RUNTIME_ERROR_KEYS],
   (data) => {
     const remember = data.rememberKeys !== false; // défaut : mémorisation activée
@@ -92,6 +125,7 @@ chrome.storage.local.get(
     if (reasoningEl) reasoningEl.checked = data.llmReasoning === true;
 
     providerEl.value = data.llmProvider || 'anthropic';
+    if (searchProviderEl) searchProviderEl.value = data.searchProvider || 'exa';
 
     const applyFields = (src) => {
       if (src.llmEndpoint) endpointEl.value = src.llmEndpoint;
@@ -101,13 +135,14 @@ chrome.storage.local.get(
       else if (data.anthropicKey) apiKeyEl.value = data.anthropicKey;
       if (src.deepgramKey) { deepgramEl.value = src.deepgramKey; deepgramEl.classList.add('saved'); }
       if (factCheckEl && src.factCheckKey) { factCheckEl.value = src.factCheckKey; factCheckEl.classList.add('saved'); }
+      ['exaKey','tavilyKey','serperKey'].forEach(kk => { if (src[kk]) searchKeys[kk] = src[kk]; });
     };
 
     if (data.rtfcLastPipelineError) {
       setRuntimeError(data.rtfcLastPipelineError, data.rtfcLastPipelineErrorAt, { persist: false });
     }
 
-    const finish = () => { applyProviderUI(); syncPresetToEndpoint(); updateHint(); scheduleKeyValidation(); };
+    const finish = () => { applyProviderUI(); applySearchUI(); syncPresetToEndpoint(); updateHint(); scheduleKeyValidation(); };
 
     if (remember) {
       applyFields(data);
@@ -145,6 +180,26 @@ providerEl.addEventListener('change', () => {
   updateHint();
   scheduleKeyValidation();
 });
+
+if (searchProviderEl) {
+  searchProviderEl.addEventListener('change', () => {
+    chrome.storage.local.set({ searchProvider: searchProviderEl.value });
+    applySearchUI();
+    updateHint();
+  });
+}
+if (searchApiKeyEl) {
+  searchApiKeyEl.addEventListener('input', () => { searchApiKeyEl.classList.remove('saved'); updateHint(); });
+  searchApiKeyEl.addEventListener('change', () => {
+    const k = searchStorageKey();
+    if (!k) return;
+    const v = searchApiKeyEl.value.trim();
+    searchKeys[k] = v;
+    persistKeys({ [k]: v });
+    searchApiKeyEl.classList.add('saved');
+    updateHint();
+  });
+}
 
 function bindSave(el, key, opts) {
   opts = opts || {};

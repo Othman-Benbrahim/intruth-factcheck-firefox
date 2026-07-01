@@ -82,6 +82,24 @@
       </div>
 
       <div class="key-field">
+        <label class="key-label">Recherche web (sources)</label>
+        <select class="key-input" id="searchProvider">
+          <option value="exa">Exa — 20 000/mois gratuit (défaut)</option>
+          <option value="tavily">Tavily — 1 000/mois gratuit</option>
+          <option value="serper">Serper — crédit de démarrage</option>
+          <option value="none">Aucune — capteurs gratuits seuls</option>
+        </select>
+      </div>
+
+      <div class="key-field" id="searchKeyField">
+        <label class="key-label" id="searchKeyLabel">Clé Exa</label>
+        <input class="key-input" id="searchApiKey" type="password" placeholder="Clé API Exa..." autocomplete="off"/>
+        <div style="font-size:10px;color:#777;line-height:1.4;margin-top:3px;">
+          Corrobore les affirmations sur le web. Les capteurs structurés (Wikipédia, Wikidata, GDELT, données officielles…) restent le socle, avec ou sans clé.
+        </div>
+      </div>
+
+      <div class="key-field">
         <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:11px;color:#bbb;">
           <input type="checkbox" id="rememberKeys" style="width:auto;margin:0;cursor:pointer;"/>
           Se souvenir de mes clés sur ce navigateur
