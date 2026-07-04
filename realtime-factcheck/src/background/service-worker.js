@@ -23,6 +23,7 @@ let EXA_KEY      = '';
 let TAVILY_KEY   = '';
 let SERPER_KEY   = '';
 let FACTCHECK_KEY = '';           // clé Google Fact Check Tools (facultative, BYOK)
+let OUTPUT_LANGUAGE = 'fr';        // langue de sortie des verdicts (claim + explanation)
 
 const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -466,7 +467,7 @@ async function loadKeys() {
   // browser.storage renvoie une Promise sous Firefox (pas de callback).
   const local = await browserAPI.storage.local.get([
     'deepgramKey', 'llmProvider', 'llmApiKey', 'llmEndpoint', 'llmModel', 'llmReasoning', 'anthropicKey', 'factCheckKey',
-    'searchProvider', 'exaKey', 'tavilyKey', 'serperKey',
+    'searchProvider', 'exaKey', 'tavilyKey', 'serperKey', 'outputLanguage',
   ]);
   // Si la mémorisation est désactivée, les clés sont en storage.session
   // (mémoire de session, non écrite sur le disque). On lit les deux, la
@@ -489,6 +490,29 @@ async function loadKeys() {
   EXA_KEY    = (pick('exaKey')    || '').trim();
   TAVILY_KEY = (pick('tavilyKey') || '').trim();
   SERPER_KEY = (pick('serperKey') || '').trim();
+  OUTPUT_LANGUAGE = local.outputLanguage || 'fr';
+}
+
+// ── Langue de sortie des verdicts (claim + explanation) ─────────────────────
+// L'auto-détection Deepgram (multi) reste inchangée : on ne pilote que la SORTIE.
+const LANGUAGE_NAMES = {
+  en: 'English', es: 'Spanish', fr: 'French', de: 'German', it: 'Italian',
+  pt: 'Portuguese', nl: 'Dutch', hi: 'Hindi', ja: 'Japanese', zh: 'Chinese',
+  ar: 'Arabic', ko: 'Korean', ru: 'Russian', pl: 'Polish', sv: 'Swedish', tr: 'Turkish',
+};
+// Localisation de la recherche Serper (paramètres gl/hl).
+const LANGUAGE_LOCALE = {
+  en: { gl: 'us', hl: 'en' }, es: { gl: 'es', hl: 'es' }, fr: { gl: 'fr', hl: 'fr' },
+  de: { gl: 'de', hl: 'de' }, it: { gl: 'it', hl: 'it' }, pt: { gl: 'br', hl: 'pt' },
+  nl: { gl: 'nl', hl: 'nl' }, hi: { gl: 'in', hl: 'hi' }, ja: { gl: 'jp', hl: 'ja' },
+  zh: { gl: 'cn', hl: 'zh-cn' }, ar: { gl: 'sa', hl: 'ar' }, ko: { gl: 'kr', hl: 'ko' },
+  ru: { gl: 'ru', hl: 'ru' }, pl: { gl: 'pl', hl: 'pl' }, sv: { gl: 'se', hl: 'sv' },
+  tr: { gl: 'tr', hl: 'tr' },
+};
+function languageInstruction() {
+  const name = LANGUAGE_NAMES[OUTPUT_LANGUAGE];
+  if (!name) return '';
+  return `\n\nLANGUAGE REQUIREMENT: Write the "claim" and "explanation" fields in ${name}, regardless of the language of the transcript or sources. Only the "verdict" values (TRUE, FALSE, SUBSTANTIALLY TRUE, MISLEADING, UNVERIFIABLE) stay in English.`;
 }
 
 const EVALUATE_PROMPT = `
@@ -661,7 +685,7 @@ async function searchSerper(query, retries = 2) {
     const res = await fetch('https://google.serper.dev/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-KEY': SERPER_KEY },
-      body: JSON.stringify({ q: query, num: 6 }),
+      body: JSON.stringify({ q: query, num: 6, ...(LANGUAGE_LOCALE[OUTPUT_LANGUAGE] || {}) }),
     });
     const data = await res.json();
     return (data.organic ?? [])
@@ -2249,7 +2273,7 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       const batchText = batches[batchIndex];
 
       const raw = await callLLM(
-        `${titleContext}Transcript chunk ${batchIndex + 1}/${batches.length}: "${batchText}"${alreadyChecked}${lexicalContext}`,
+        `${titleContext}Transcript chunk ${batchIndex + 1}/${batches.length}: "${batchText}"${alreadyChecked}${lexicalContext}${languageInstruction()}`,
         EVALUATE_PROMPT
       );
 
@@ -2569,7 +2593,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
           };
         }
         const raw = await callLLM(
-          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nSources (web, encyclopédies, bases scientifiques/médicales, données officielles, actualité, fact-checks déjà publiés) — base ton verdict sur ces éléments. Accorde un poids fort aux données officielles (Banque Mondiale), au consensus scientifique et aux fact-checks d'organismes reconnus ; un article signalé « RÉTRACTÉ » ne doit pas servir de preuve à charge ou à décharge.\n\nRenseigne le champ "used_sources" avec les numéros des sources ci-dessous réellement utilisées pour ce verdict (exclus les sources hors-sujet ; [] si aucune n’est pertinente) :\n${urlGroups.text}${lexicalContext}${sportCaution}${corrobContext}`,
+          `${titleContext}Transcript: "${contextText}"\n\nEvaluate ONLY this specific claim:\n1. ${fastResult.claim}\n\nAvailable bilingual versions, when present:\nFrench: ${fastResult.claim_fr || fastResult.translation_fr || ''}\nEnglish: ${fastResult.claim_en || fastResult.translation_en || ''}\n\nSources (web, encyclopédies, bases scientifiques/médicales, données officielles, actualité, fact-checks déjà publiés) — base ton verdict sur ces éléments. Accorde un poids fort aux données officielles (Banque Mondiale), au consensus scientifique et aux fact-checks d'organismes reconnus ; un article signalé « RÉTRACTÉ » ne doit pas servir de preuve à charge ou à décharge.\n\nRenseigne le champ "used_sources" avec les numéros des sources ci-dessous réellement utilisées pour ce verdict (exclus les sources hors-sujet ; [] si aucune n’est pertinente) :\n${urlGroups.text}${lexicalContext}${sportCaution}${corrobContext}${languageInstruction()}`,
           EVALUATE_PROMPT
         );
         const parsed = parseArrayWithDiagnostics(raw);
