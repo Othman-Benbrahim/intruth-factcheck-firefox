@@ -12,6 +12,17 @@ const modelLabel   = document.getElementById('modelLabel');
 const apiKeyEl     = document.getElementById('llmApiKey');
 const apiKeyLabel  = document.getElementById('apiKeyLabel');
 const deepgramEl   = document.getElementById('deepgramKey');
+const outputLanguageEl = document.getElementById('outputLanguage');
+const langFlagEl       = document.getElementById('langFlag');
+const LANG_FLAGS = {
+  fr: '\u{1F1EB}\u{1F1F7}', en: '\u{1F1FA}\u{1F1F8}', es: '\u{1F1EA}\u{1F1F8}', de: '\u{1F1E9}\u{1F1EA}',
+  it: '\u{1F1EE}\u{1F1F9}', pt: '\u{1F1E7}\u{1F1F7}', nl: '\u{1F1F3}\u{1F1F1}', hi: '\u{1F1EE}\u{1F1F3}',
+  ja: '\u{1F1EF}\u{1F1F5}', zh: '\u{1F1E8}\u{1F1F3}', ar: '\u{1F1F8}\u{1F1E6}', ko: '\u{1F1F0}\u{1F1F7}',
+  ru: '\u{1F1F7}\u{1F1FA}', pl: '\u{1F1F5}\u{1F1F1}', sv: '\u{1F1F8}\u{1F1EA}', tr: '\u{1F1F9}\u{1F1F7}',
+};
+function updateLangFlag() {
+  if (langFlagEl && outputLanguageEl) langFlagEl.textContent = LANG_FLAGS[outputLanguageEl.value] || '\u{1F310}';
+}
 const factCheckEl  = document.getElementById('factCheckKey');
 const searchProviderEl = document.getElementById('searchProvider');
 const searchApiKeyEl   = document.getElementById('searchApiKey');
@@ -93,6 +104,7 @@ function saveAllForStart() {
   chrome.storage.local.set({
     llmProvider: providerEl.value,
     searchProvider: searchProviderEl ? searchProviderEl.value : 'exa',
+    outputLanguage: outputLanguageEl ? outputLanguageEl.value : 'fr',
     llmReasoning: reasoningEl ? reasoningEl.checked : false,
     rememberKeys: rememberEnabled(),
   });
@@ -117,7 +129,7 @@ function saveAllForStart() {
 
 chrome.storage.local.get(
   ['llmProvider', 'llmEndpoint', 'llmModel', 'llmApiKey', 'anthropicKey', 'deepgramKey', 'factCheckKey',
-   'searchProvider', 'exaKey', 'tavilyKey', 'serperKey',
+   'searchProvider', 'exaKey', 'tavilyKey', 'serperKey', 'outputLanguage',
    'llmReasoning', 'rememberKeys', ...RUNTIME_ERROR_KEYS],
   (data) => {
     const remember = data.rememberKeys !== false; // défaut : mémorisation activée
@@ -126,6 +138,7 @@ chrome.storage.local.get(
 
     providerEl.value = data.llmProvider || 'anthropic';
     if (searchProviderEl) searchProviderEl.value = data.searchProvider || 'exa';
+    if (outputLanguageEl) { outputLanguageEl.value = data.outputLanguage || 'fr'; updateLangFlag(); }
 
     const applyFields = (src) => {
       if (src.llmEndpoint) endpointEl.value = src.llmEndpoint;
@@ -186,6 +199,12 @@ if (searchProviderEl) {
     chrome.storage.local.set({ searchProvider: searchProviderEl.value });
     applySearchUI();
     updateHint();
+  });
+}
+if (outputLanguageEl) {
+  outputLanguageEl.addEventListener('change', () => {
+    chrome.storage.local.set({ outputLanguage: outputLanguageEl.value });
+    updateLangFlag();
   });
 }
 if (searchApiKeyEl) {
