@@ -26,7 +26,7 @@ La plupart des articles de fact-checking paraissent des jours après l'événeme
 - **Export de session** — rapport récapitulatif des verdicts exportable (avec sources et horodatage).
 - **Mémorisation des clés** — au choix, clés conservées localement ou gardées uniquement pour la session en cours.
 - **Bring-Your-Own-Key (BYOK)** — vous fournissez vos propres clés API ; l'auteur n'y a aucun accès.
-
+- **Verdicts multilingues**— choisissez la langue de sortie (16 langues) ; les affirmations et explications sont rédigées dans cette langue, quelle que soit la langue parlée.
 ---
 
 ## 🔧 Comment ça marche
@@ -157,6 +157,21 @@ La recherche web se choisit **dans le popup** (section « Recherche web »), pas
 > Sur du contenu **francophone**, Exa peut renvoyer peu de résultats → basculez sur **Tavily** ou **Serper** pour une meilleure corroboration. Les paliers gratuits évoluent : vérifiez le vôtre sur le tableau de bord du fournisseur.
 
 ---
+
+## 🌍 Langue des verdicts (multilingue)
+
+InTruth peut rédiger les verdicts dans la langue de votre choix, indépendamment de la langue parlée dans la vidéo. Sélectionnez-la dans le popup (**« Langue des verdicts »**).
+
+- La **transcription reste en auto-détection** (Deepgram `multi`) : la langue parlée est reconnue automatiquement, on n'y touche pas.
+- Seule la **sortie** est traduite : les champs *affirmation* et *explication* sont rédigés dans la langue choisie ; les libellés de verdict (`VRAI`, `FAUX`…) restent standardisés.
+- La recherche **Serper** est localisée (`gl`/`hl`) selon la langue.
+
+Exemple : sur une vidéo **anglaise** avec « Français » sélectionné, la parole est transcrite en anglais, mais les affirmations et explications s'affichent **en français** — un véritable effet « traducteur » du fact-check.
+
+> Langues disponibles : français, anglais, espagnol, allemand, italien, portugais, néerlandais, hindi, japonais, chinois, arabe, coréen, russe, polonais, suédois, turc.
+
+---
+
 
 ## 🔑 Clés API & mémorisation
 
