@@ -26,7 +26,7 @@ La plupart des articles de fact-checking paraissent des jours après l'événeme
 - **Export de session** — rapport récapitulatif des verdicts exportable (avec sources et horodatage).
 - **Mémorisation des clés** — au choix, clés conservées localement ou gardées uniquement pour la session en cours.
 - **Bring-Your-Own-Key (BYOK)** — vous fournissez vos propres clés API ; l'auteur n'y a aucun accès.
-- **Verdicts multilingues**— choisissez la langue de sortie (16 langues) ; les affirmations et explications sont rédigées dans cette langue, quelle que soit la langue parlée.
+- **Verdicts multilingues** — choisissez la langue de sortie (16 langues) ; les affirmations et explications sont rédigées dans cette langue, quelle que soit la langue parlée.
 ---
 
 ## 🔧 Comment ça marche
