@@ -24,6 +24,7 @@ let TAVILY_KEY   = '';
 let SERPER_KEY   = '';
 let FACTCHECK_KEY = '';           // clé Google Fact Check Tools (facultative, BYOK)
 let OUTPUT_LANGUAGE = 'fr';        // langue de sortie des verdicts (claim + explanation)
+let RESOLVE_PRONOUNS = false;      // résolution des pronoms (pilotée depuis le tiroir du panneau)
 
 const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -491,6 +492,10 @@ async function loadKeys() {
   TAVILY_KEY = (pick('tavilyKey') || '').trim();
   SERPER_KEY = (pick('serperKey') || '').trim();
   OUTPUT_LANGUAGE = local.outputLanguage || 'fr';
+  try {
+    const st = await browserAPI.storage.local.get(['intruthSettings']);
+    RESOLVE_PRONOUNS = Boolean(st && st.intruthSettings && st.intruthSettings.resolvePronouns);
+  } catch (_) { RESOLVE_PRONOUNS = false; }
 }
 
 // ── Langue de sortie des verdicts (claim + explanation) ─────────────────────
@@ -2220,6 +2225,73 @@ async function onNewSentence(text, speakerId) {
 
 // ── Evaluation pipeline ───────────────────────────────────────────────────────
 
+// ── Résolution des tournures indirectes (option, pilotée depuis le panneau) ──
+// Remplace les renvois vagues à l'adversaire par son nom, pour rendre l'affirmation
+// vérifiable : « ça vient de quelqu'un qui… » → « ça vient de Dupont qui… ».
+// Désactivée par défaut : elle réécrit le transcript avant analyse.
+
+// Le tiroir du panneau écrit dans storage.local → on reste synchronisé en direct.
+try {
+  browserAPI.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.intruthSettings) return;
+    const v = changes.intruthSettings.newValue;
+    RESOLVE_PRONOUNS = Boolean(v && v.resolvePronouns);
+    console.log('[settings] résolution des pronoms :', RESOLVE_PRONOUNS ? 'activée' : 'désactivée');
+  });
+} catch (_) {}
+
+function getOpponentName(speakerName) {
+  const confirmed = Object.values(speakerIdToName).filter(Boolean);
+  if (confirmed.length >= 2 && speakerName) {
+    const opponent = confirmed.find(n => String(n).toLowerCase() !== String(speakerName).toLowerCase());
+    if (opponent) return opponent;
+  }
+  const titleNames = parseSpeakersFromTitle(pageTitle);
+  if (titleNames.length >= 2 && speakerName) {
+    const low = String(speakerName).toLowerCase();
+    return titleNames.find(n =>
+      !n.toLowerCase().includes(low) && !low.includes(n.toLowerCase())
+    ) || (titleNames[0].toLowerCase() === low ? titleNames[1] : titleNames[0]);
+  }
+  return null;
+}
+
+const FR_LEGAL_TERMS = "(condamn\u00e9e?s?|poursuivie?s?|inculp\u00e9e?s?|mis(?:e|es|s)? en examen|jug\u00e9e?s?|arr\u00eat\u00e9e?s?|destitu\u00e9e?s?|relax\u00e9e?s?|incarc\u00e9r\u00e9e?s?)";
+const EN_LEGAL_TERMS = "(prosecuted|convicted|indicted|sentenced|charged|arrested|impeached)";
+
+function resolveDismissivePronouns(text, speakerName, opponentName) {
+  if (!opponentName || typeof text !== 'string' || !text) return text;
+  let t = text;
+
+  // ── Français ──
+  // « venant / ça vient / de la part de quelqu'un qui… »
+  t = t.replace(/\b(venant|vient|part)\s+de\s+quelqu[’']un\s+qui\b/gi,
+    (m, p) => `${p} de ${opponentName} qui`);
+  // « vous avez été condamné » → « X a été condamné »
+  t = t.replace(new RegExp(`\\bvous\\s+avez\\s+\u00e9t\u00e9\\s+${FR_LEGAL_TERMS}`, 'gi'),
+    (m, term) => `${opponentName} a \u00e9t\u00e9 ${term}`);
+  // « vous êtes / vous fûtes condamné » → « X est condamné »
+  t = t.replace(new RegExp(`\\bvous\\s+[\u00eae]tes\\s+${FR_LEGAL_TERMS}`, 'gi'),
+    (m, term) => `${opponentName} est ${term}`);
+  // « il / elle a été condamné » → « X a été condamné »
+  t = t.replace(new RegExp(`\\b(?:il|elle)\\s+a\\s+\u00e9t\u00e9\\s+${FR_LEGAL_TERMS}`, 'gi'),
+    (m, term) => `${opponentName} a \u00e9t\u00e9 ${term}`);
+
+  // ── Anglais ──
+  t = t.replace(/coming from someone who/gi, `coming from ${opponentName} who`);
+  t = t.replace(/said by someone who/gi,     `said by ${opponentName} who`);
+  t = t.replace(/from (?:a )?(?:man|woman|guy|person) who/gi, `from ${opponentName} who`);
+  t = t.replace(/\bfrom (?:him|her|them)\b/gi, `from ${opponentName}`);
+  t = t.replace(/\byou(?:'ve| have)? been found liable/gi, `${opponentName} has been found liable`);
+  t = t.replace(/\byou were found liable/gi, `${opponentName} was found liable`);
+  t = t.replace(new RegExp(`\\byou(?:'ve| have| were| are| got)\\s+(?:been\\s+)?${EN_LEGAL_TERMS}`, 'gi'),
+    (match, term) => `${opponentName} ${match.toLowerCase().includes('were') ? 'was' : 'has been'} ${term}`);
+  t = t.replace(new RegExp(`\\b(?:he|she)\\s+(has been|was|have been|were)\\s+${EN_LEGAL_TERMS}`, 'gi'),
+    (match, tense, term) => `${opponentName} ${tense} ${term}`);
+
+  return t;
+}
+
 async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapshot, dominantSpeaker, dominantSpeakerId) {
   analysisAttemptCount++;
   setAnalysisDebug('evaluate_started', {
@@ -2230,6 +2302,11 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
   });
 
   try {
+    if (RESOLVE_PRONOUNS) {
+      const opponentName = getOpponentName(dominantSpeaker);
+      if (opponentName) contextText = resolveDismissivePronouns(contextText, dominantSpeaker, opponentName);
+    }
+
     const dateContext    = pageDate ? `\nDate: ${pageDate}` : '';
 
     const titleNames    = parseSpeakersFromTitle(title || '');
