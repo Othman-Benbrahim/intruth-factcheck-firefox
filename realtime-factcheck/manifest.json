@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "InTruth",
-  "version": "1.7.0",
+  "version": "2.0.0",
   "description": "Extension Firefox de fact-checking en temps r\u00e9el \u00e0 partir de la transcription audio",
   "browser_specific_settings": {
     "gecko": {
