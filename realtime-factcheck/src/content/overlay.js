@@ -350,6 +350,89 @@ function showError(message, opts) {
   }
 }
 // ── Panel ─────────────────────────────────────────────────────────────────────
+// ── Réglages du panneau (persistés, pilotés depuis le tiroir) ───────────────
+const DEFAULT_SETTINGS = {
+  panelSize:       'medium',  // small | medium | large
+  fontSize:        'normal',  // small | normal | large
+  verdictFilter:   'all',     // all | flagged | accurate
+  resolvePronouns: false,     // résolution des pronoms (désactivée par défaut)
+};
+let settings = { ...DEFAULT_SETTINGS };
+
+function loadSettings(cb) {
+  try {
+    chrome.storage.local.get(['intruthSettings'], (data) => {
+      if (data && data.intruthSettings) {
+        settings = { ...DEFAULT_SETTINGS, ...data.intruthSettings };
+      }
+      if (cb) cb();
+    });
+  } catch (_) { if (cb) cb(); }
+}
+
+function saveSettings() {
+  try { chrome.storage.local.set({ intruthSettings: settings }); } catch (_) {}
+}
+
+function applySettings() {
+  if (!panel) return;
+  panel.classList.remove('rtfc-size--small', 'rtfc-size--medium', 'rtfc-size--large');
+  panel.classList.add('rtfc-size--' + settings.panelSize);
+  panel.classList.remove('rtfc-font--small', 'rtfc-font--normal', 'rtfc-font--large');
+  panel.classList.add('rtfc-font--' + settings.fontSize);
+  // reflète l'état actif des boutons du tiroir
+  panel.querySelectorAll('.rtfc-setting-options').forEach(group => {
+    const key = group.dataset.setting;
+    group.querySelectorAll('button').forEach(btn => {
+      btn.classList.toggle('rtfc-setting-btn--active', String(settings[key]) === btn.dataset.value);
+    });
+  });
+  refilterVerdicts();
+}
+
+// ── Filtre d'affichage des verdicts ────────────────────────────────────────
+function shouldShowVerdict(verdict) {
+  const v = String(verdict || '').toUpperCase();
+  if (settings.verdictFilter === 'flagged')  return v === 'FALSE' || v === 'MISLEADING';
+  if (settings.verdictFilter === 'accurate') return v === 'TRUE'  || v === 'SUBSTANTIALLY TRUE';
+  return true; // 'all'
+}
+
+function applyFilterToCard(card, result) {
+  if (!card) return;
+  // les cartes en attente restent visibles : leur verdict n'est pas définitif
+  const show = (result && result.pending) ? true : shouldShowVerdict(result && result.verdict);
+  card.style.display = show ? '' : 'none';
+}
+
+function refilterVerdicts() {
+  if (!verdictListEl) return;
+  verdictListEl.querySelectorAll('.rtfc-verdict').forEach(card => {
+    applyFilterToCard(card, card._resultData);
+  });
+}
+
+// ── Clic sur l'horodatage : saut dans la vidéo ─────────────────────────────
+function timestampToSeconds(ts) {
+  if (!ts) return null;
+  const parts = String(ts).trim().split(':').map(Number);
+  if (parts.some(n => !Number.isFinite(n))) return null;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return null;
+}
+
+function seekVideo(ts) {
+  const secs = timestampToSeconds(ts);
+  if (secs === null) return;
+  const video = document.querySelector('video');
+  if (!video) return;
+  try {
+    video.currentTime = Math.max(0, secs);
+    if (video.paused) video.play().catch(() => {});
+  } catch (_) {}
+}
+
 function createPanel() {
   if (panel) return;
 
@@ -371,6 +454,15 @@ function createPanel() {
   const headerActions = document.createElement('div');
   headerActions.className = 'rtfc-header-actions';
 
+  const settingsBtn = document.createElement('button');
+  settingsBtn.id = 'rtfc-settings';
+  settingsBtn.type = 'button';
+  settingsBtn.title = 'Réglages du panneau';
+  settingsBtn.setAttribute('aria-label', 'Réglages du panneau');
+  settingsBtn.setAttribute('aria-expanded', 'false');
+  settingsBtn.textContent = '⚙';
+  headerActions.appendChild(settingsBtn);
+
   const exportBtn = document.createElement('button');
   exportBtn.id = 'rtfc-export';
   exportBtn.type = 'button';
@@ -388,6 +480,53 @@ function createPanel() {
 
   header.appendChild(headerActions);
   panel.appendChild(header);
+
+  // ── Tiroir de réglages ──
+  const drawer = document.createElement('div');
+  drawer.id = 'rtfc-settings-drawer';
+  drawer.style.display = 'none';
+  drawer.setAttribute('role', 'group');
+  drawer.setAttribute('aria-label', 'Réglages du panneau');
+
+  const buildSettingRow = (labelText, settingKey, options) => {
+    const row = document.createElement('div');
+    row.className = 'rtfc-setting-row';
+    const label = document.createElement('span');
+    label.className = 'rtfc-setting-label';
+    label.textContent = labelText;
+    row.appendChild(label);
+    const group = document.createElement('div');
+    group.className = 'rtfc-setting-options';
+    group.dataset.setting = settingKey;
+    options.forEach(opt => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.dataset.value = opt.value;
+      btn.textContent = opt.label;
+      if (opt.title) btn.title = opt.title;
+      group.appendChild(btn);
+    });
+    row.appendChild(group);
+    return row;
+  };
+
+  drawer.appendChild(buildSettingRow('Taille du panneau', 'panelSize', [
+    { value: 'small', label: 'S' }, { value: 'medium', label: 'M' }, { value: 'large', label: 'L' },
+  ]));
+  drawer.appendChild(buildSettingRow('Taille du texte', 'fontSize', [
+    { value: 'small', label: 'S' }, { value: 'normal', label: 'M' }, { value: 'large', label: 'L' },
+  ]));
+  drawer.appendChild(buildSettingRow('Afficher', 'verdictFilter', [
+    { value: 'all',      label: 'Tout' },
+    { value: 'flagged',  label: 'Problèmes', title: 'Uniquement FAUX et TROMPEUR' },
+    { value: 'accurate', label: 'Confirmés', title: 'Uniquement VRAI et SUBSTANTIELLEMENT VRAI' },
+  ]));
+  drawer.appendChild(buildSettingRow('Résolution des pronoms', 'resolvePronouns', [
+    { value: 'false', label: 'Off', title: 'Analyse le transcript tel quel' },
+    { value: 'true',  label: 'On',  title: "Remplace les tournures indirectes (« ça vient de quelqu'un qui… », « vous avez été condamné ») par le nom de l'adversaire avant analyse" },
+  ]));
+
+  panel.appendChild(drawer);
 
   const body = document.createElement('div');
   body.id = 'rtfc-body';
@@ -490,6 +629,32 @@ function createPanel() {
   });
 
   panel.querySelector('#rtfc-export').addEventListener('click', () => exportPDF());
+
+  // ── Réglages : ouverture du tiroir ──
+  const settingsBtnEl = panel.querySelector('#rtfc-settings');
+  const drawerEl      = panel.querySelector('#rtfc-settings-drawer');
+  settingsBtnEl.addEventListener('click', () => {
+    const open = drawerEl.style.display === 'none';
+    drawerEl.style.display = open ? 'block' : 'none';
+    settingsBtnEl.setAttribute('aria-expanded', open ? 'true' : 'false');
+    settingsBtnEl.classList.toggle('rtfc-settings--open', open);
+  });
+
+  // ── Réglages : clic sur une option ──
+  drawerEl.querySelectorAll('.rtfc-setting-options').forEach(group => {
+    const key = group.dataset.setting;
+    group.querySelectorAll('button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const raw = btn.dataset.value;
+        settings[key] = (raw === 'true') ? true : (raw === 'false') ? false : raw;
+        saveSettings();
+        applySettings();
+      });
+    });
+  });
+
+  // charge les réglages puis les applique (taille, police, filtre, état des boutons)
+  loadSettings(() => applySettings());
 
   makeDraggable(panel);
 
@@ -702,6 +867,18 @@ function buildCard(result) {
   const timestamp = document.createElement('span');
   timestamp.className = 'rtfc-timestamp';
   timestamp.textContent = result._timestamp || '';
+  if (result._timestamp && timestampToSeconds(result._timestamp) !== null) {
+    timestamp.classList.add('rtfc-timestamp--seek');
+    timestamp.setAttribute('role', 'button');
+    timestamp.setAttribute('tabindex', '0');
+    timestamp.title = 'Aller à ce moment de la vidéo';
+    timestamp.setAttribute('aria-label', 'Aller à ' + result._timestamp + ' dans la vidéo');
+    const jump = (e) => { e.stopPropagation(); seekVideo(result._timestamp); };
+    timestamp.addEventListener('click', jump);
+    timestamp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(e); }
+    });
+  }
   header.appendChild(timestamp);
 
   card.appendChild(header);
@@ -843,6 +1020,7 @@ function addVerdict(result) {
   } else {
     logVerdict(result);
   }
+  applyFilterToCard(card, result);
   verdictListEl.prepend(card);
 }
 
@@ -854,6 +1032,7 @@ function updateVerdict(result) {
     result.dominantSpeakerId = existing.dataset.speakerid;
   }
   const newCard = buildCard(result);
+  applyFilterToCard(newCard, result);
   if (existing) {
     existing.replaceWith(newCard);
     for (const [k, v] of pendingCards) {

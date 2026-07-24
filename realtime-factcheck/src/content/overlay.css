@@ -583,3 +583,116 @@
   color: #4ade80;
   border: 0.5px solid rgba(74, 222, 128, 0.30);
 }
+
+/* ── Bouton réglages ── */
+
+#rtfc-settings {
+  background: none;
+  border: 0.5px solid rgba(255,255,255,0.15);
+  border-radius: 4px;
+  color: #888;
+  font-size: 11px;
+  font-family: 'Inter', sans-serif;
+  line-height: 1;
+  padding: 3px 6px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+#rtfc-settings:hover,
+#rtfc-settings.rtfc-settings--open {
+  color: #e8e8e8;
+  border-color: rgba(255,255,255,0.35);
+}
+
+/* ── Tiroir de réglages ── */
+
+#rtfc-settings-drawer {
+  padding: 8px 14px 10px;
+  border-bottom: 0.5px solid rgba(255,255,255,0.07);
+  background: rgba(255,255,255,0.02);
+  flex-shrink: 0;
+}
+
+.rtfc-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.rtfc-setting-row:last-child { margin-bottom: 0; }
+
+.rtfc-setting-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: #777;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.rtfc-setting-options {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.rtfc-setting-options button {
+  background: rgba(255,255,255,0.05);
+  border: 0.5px solid rgba(255,255,255,0.1);
+  border-radius: 4px;
+  color: #888;
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 9.5px;
+  font-weight: 500;
+  padding: 3px 7px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.rtfc-setting-options button:hover {
+  color: #e8e8e8;
+  border-color: rgba(255,255,255,0.3);
+}
+
+.rtfc-setting-options button.rtfc-setting-btn--active {
+  background: rgba(74,222,128,0.15);
+  border-color: rgba(74,222,128,0.4);
+  color: #4ade80;
+}
+
+/* ── Taille du panneau ── */
+
+#rtfc-panel.rtfc-size--small  { width: clamp(240px, 18vw, 300px); }
+#rtfc-panel.rtfc-size--medium { width: clamp(280px, 23vw, 380px); }
+#rtfc-panel.rtfc-size--large  { width: clamp(340px, 30vw, 480px); max-height: min(760px, calc(100vh - 60px)); }
+
+/* ── Taille du texte ── */
+
+#rtfc-panel.rtfc-font--small  { font-size: 11px; }
+#rtfc-panel.rtfc-font--normal { font-size: 12px; }
+#rtfc-panel.rtfc-font--large  { font-size: 13.5px; }
+
+#rtfc-panel.rtfc-font--large .rtfc-claim       { font-size: 13px; }
+#rtfc-panel.rtfc-font--large .rtfc-explanation { font-size: 12.5px; }
+#rtfc-panel.rtfc-font--large #rtfc-transcript-feed { font-size: 13px; }
+#rtfc-panel.rtfc-font--small .rtfc-claim       { font-size: 10.5px; }
+#rtfc-panel.rtfc-font--small .rtfc-explanation { font-size: 10px; }
+#rtfc-panel.rtfc-font--small #rtfc-transcript-feed { font-size: 10.5px; }
+
+/* ── Horodatage cliquable (saut vidéo) ── */
+
+.rtfc-timestamp--seek {
+  cursor: pointer;
+  color: #6b7fa8;
+  border-bottom: 0.5px dashed rgba(255,255,255,0.2);
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.rtfc-timestamp--seek:hover,
+.rtfc-timestamp--seek:focus-visible {
+  color: #3b82f6;
+  border-color: rgba(59,130,246,0.6);
+  outline: none;
+}
