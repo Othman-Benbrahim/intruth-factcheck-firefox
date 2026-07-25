@@ -136,12 +136,13 @@ const SW_EXPORTS = `{
 const OVERLAY_EXPORTS = `{
   timestampToSeconds, shouldShowVerdict, colorForVerdict,
   commitmentFromLexical, computeDissonance, parseSpeakersFromTitle,
-  escapeHtml, DEFAULT_SETTINGS,
+  escapeHtml, DEFAULT_SETTINGS, shouldShowDiscourse, discourseLabel, DISCOURSE_LABELS,
   setSettings(o) { settings = Object.assign({}, DEFAULT_SETTINGS, o); }
 }`;
 
 const SESSION_EXPORTS = `{
-  EVENT_TYPES, EVENT_STATUS, MAX_EVENTS,
+  EVENT_TYPES, EVENT_STATUS, DISCOURSE_TYPES, MAX_EVENTS,
+  discourseKindOf, discourseStatement, splitDiscourseItems, upsertDiscourseEvent,
   makeEventId, claimFingerprint, claimSimilarity,
   createSession, endSession, isSessionActive,
   findClaimEvent, claimEventFromResult, upsertClaimEvent, setSessionSpeakers,
