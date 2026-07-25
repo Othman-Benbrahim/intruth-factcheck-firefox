@@ -2964,6 +2964,16 @@ function connectDeepgram() {
   return new Promise((resolve, reject) => {
     if (!DEEPGRAM_KEY) { reject(new Error('Deepgram key missing')); return; }
 
+    // Une connexion déjà ouverte est réutilisée ; une connexion en cours
+    // d'établissement ou moribonde est fermée avant d'en ouvrir une autre.
+    // Sans cela, relancer la capture (après un rechargement de page, par
+    // exemple) laisserait deux sockets ouverts — et doublerait la facture.
+    if (deepgramSocket) {
+      if (deepgramSocket.readyState === WebSocket.OPEN) { resolve(); return; }
+      try { deepgramSocket.close(); } catch (_) {}
+      deepgramSocket = null;
+    }
+
     const deepgramParams = new URLSearchParams({
       encoding: 'linear16',
       sample_rate: '16000',
@@ -3102,6 +3112,98 @@ function connectDeepgram() {
 
 let activeTabId = null;
 let isCapturing = false;
+
+// ── Revue de session ────────────────────────────────────────────────────────
+// Un seul appel LLM, en fin de session, sur le CONDENSÉ des événements.
+// C'est ici — et pas en direct — qu'on cherche des procédés rhétoriques : plus
+// de contexte, aucune pression temporelle, donc beaucoup moins de faux positifs.
+
+const REVIEW_PROMPT = `
+You review a completed fact-checking session.
+You receive a numbered list of recorded events, not a raw transcript.
+
+Return ONLY valid JSON. No Markdown, no code fences, no text around it.
+
+Shape:
+{
+  "summary": "two or three sentences describing what was discussed and how it held up factually",
+  "patterns": ["short observation", "short observation"],
+  "fallacies": [
+    { "type": "FALSE_DILEMMA | WHATABOUTISM | AD_HOMINEM",
+      "quote": "the exact wording from the list, copied verbatim",
+      "criterion": "the structural reason this qualifies, in one sentence",
+      "speaker": "name or Unknown" }
+  ],
+  "unresolved": ["statement that was never verified"]
+}
+
+Hard rules:
+- NEUTRALITY: describe only what the wording does. Never infer intent, sincerity,
+  ideology or party. Never state who was right overall, never rank the speakers,
+  never characterise anyone politically.
+- PRECISION OVER RECALL: report a rhetorical device only when the structure is
+  unmistakable. When in doubt, omit it. An empty "fallacies" list is a valid,
+  expected answer.
+- Every entry in "fallacies" MUST copy an exact excerpt from the list into
+  "quote". Never paraphrase, never invent wording. Entries without a verbatim
+  excerpt are discarded.
+- Only the three listed types are accepted. Nothing else.
+- At most 5 entries in "fallacies", at most 4 in "patterns".
+- A prediction or a commitment is not a fallacy.
+`;
+
+async function runSessionReview(session) {
+  if (!canReviewSession(session)) {
+    return { ok: false, reason: 'not-enough-events' };
+  }
+
+  const digest = buildReviewDigest(session);
+  if (!digest.lines.length) return { ok: false, reason: 'empty-digest' };
+
+  const header = session.source && session.source.title
+    ? `Session: "${session.source.title}"${session.source.date ? ' (' + session.source.date + ')' : ''}\n`
+    : '';
+  const noticeTruncated = digest.truncated
+    ? '\n(Note: only the most recent events are listed.)'
+    : '';
+
+  const userMessage =
+    `${header}Recorded events (${digest.lines.length}):\n${digest.lines.join('\n')}${noticeTruncated}` +
+    languageInstruction();
+
+  const raw = await callLLM(userMessage, REVIEW_PROMPT);
+  const parsed = parseObjectLoose(raw);
+  if (!parsed) return { ok: false, reason: 'parse-failed', rawPreview: previewLLMResponse(raw, 240) };
+
+  // Les constats non étayés par une citation réelle sont écartés ici, pas
+  // laissés à l'appréciation du modèle.
+  const validated = validateReviewFindings(parsed.fallacies, digest.texts);
+
+  const review = {
+    generatedAt: Date.now(),
+    summary:    String(parsed.summary || '').trim(),
+    patterns:   (Array.isArray(parsed.patterns) ? parsed.patterns : []).map(String).slice(0, 4),
+    findings:   validated.findings,
+    rejected:   validated.rejected,
+    unresolved: (Array.isArray(parsed.unresolved) ? parsed.unresolved : []).map(String).slice(0, 10),
+    counts:     digest.counts,
+    truncated:  digest.truncated,
+  };
+
+  console.log('[revue] constats retenus :', review.findings.length, '| écartés :', validated.rejected);
+  return { ok: true, review };
+}
+
+/** Extrait un objet JSON d'une réponse LLM, tolérant au bavardage autour. */
+function parseObjectLoose(text) {
+  if (!text) return null;
+  const cleaned = String(text).replace(/```json|```/gi, '').trim();
+  const start = cleaned.indexOf('{');
+  const end   = cleaned.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) return null;
+  try { return JSON.parse(cleaned.slice(start, end + 1)); }
+  catch (_) { return null; }
+}
 
 // ── Mémoire de session ──────────────────────────────────────────────────────
 // Source de vérité de l'historique, persistée hors de la page. Toute écriture
@@ -3256,6 +3358,52 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       validateKeysBeforeStart(msg.config || {})
         .then((result) => sendResponse(result))
         .catch((err) => sendResponse({ ok: false, message: err.message || 'Validation impossible.' }));
+      return true;
+
+    case 'CONTENT_READY':
+      // Le content script vient d'être (ré)injecté — typiquement après un
+      // rechargement de page. Si une session tourne sur cet onglet, on lui
+      // renvoie l'historique pour qu'il remonte le panneau.
+      (async () => {
+        const tabId = sender && sender.tab && sender.tab.id;
+        if (!isCapturing || !tabId || tabId !== activeTabId) { sendResponse({ restored: false }); return; }
+
+        let session = currentSession;
+        if (!session) session = await loadStoredSession();
+        if (!session || !isSessionActive(session)) { sendResponse({ restored: false }); return; }
+
+        // Le flux audio est mort avec la page : l'utilisateur devra relancer
+        // la capture (getUserMedia exige un geste utilisateur).
+        audioFlowing = false;
+
+        browserAPI.tabs.sendMessage(tabId, {
+          type: 'RESTORE_SESSION',
+          session: serializeSession(session),
+        }).catch(() => {});
+
+        console.log('[session] panneau restauré après rechargement :', session.events.length, 'événements');
+        sendResponse({ restored: true, events: session.events.length });
+      })();
+      return true;
+
+    case 'REVIEW_SESSION':
+      (async () => {
+        try {
+          let session = currentSession;
+          if (!session) session = await loadStoredSession();
+          if (!session) { sendResponse({ ok: false, reason: 'no-session' }); return; }
+
+          const result = await runSessionReview(session);
+          if (result.ok) {
+            session.review = result.review;
+            saveSessionNow(session);
+          }
+          sendResponse(result);
+        } catch (err) {
+          console.error('[revue] échec :', err && err.message);
+          sendResponse({ ok: false, reason: 'error', message: err && err.message });
+        }
+      })();
       return true;
 
     case 'GET_SESSION':
