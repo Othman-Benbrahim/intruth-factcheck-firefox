@@ -91,10 +91,20 @@ describe('détection du discours — garde-fous', () => {
   });
 
   test('aucun appel LLM supplémentaire : la consigne rejoint le prompt existant', () => {
-    const calls = (serviceWorker.match(/await callLLM\(/g) || []).length;
-    assert.equal(calls, 2, `attendu 2 appels LLM (rapide + sourcé), trouvé ${calls}`);
     assert.match(serviceWorker, /\$\{languageInstruction\(\)\}\$\{discourseInstruction\(\)\}/,
       'la consigne de discours doit être ajoutée au prompt rapide existant');
+  });
+
+  test('le flux temps réel ne fait que deux appels LLM par fenêtre', () => {
+    // La revue de session est un troisième appel, mais à la demande : il doit
+    // vivre dans runSessionReview, jamais dans le pipeline d'analyse.
+    const review = serviceWorker.match(/async function runSessionReview[\s\S]*?\n}/);
+    assert.ok(review, 'runSessionReview introuvable');
+
+    const liveCalls = (serviceWorker.replace(review[0], '').match(/await callLLM\(/g) || []).length;
+    assert.equal(liveCalls, 2, `attendu 2 appels LLM en direct (rapide + sourcé), trouvé ${liveCalls}`);
+    assert.equal((review[0].match(/await callLLM\(/g) || []).length, 1,
+      'la revue doit tenir en un seul appel');
   });
 
   test('la séparation précède la normalisation des verdicts', () => {
@@ -113,6 +123,41 @@ describe('détection du discours — garde-fous', () => {
 
   test('le prompt interdit explicitement de juger ces énoncés', () => {
     assert.match(serviceWorker, /NEVER give them a verdict/i);
+  });
+});
+
+describe('revue de session — garde-fous', () => {
+  test('la revue ne se déclenche qu’à la demande', () => {
+    assert.match(serviceWorker, /case 'REVIEW_SESSION'/);
+    // Aucun appel automatique depuis le pipeline d'analyse ni à l'arrêt.
+    const stop = serviceWorker.match(/function stopFactCheck[\s\S]*?\n}/);
+    assert.ok(stop);
+    assert.doesNotMatch(stop[0], /runSessionReview/,
+      'la revue ne doit pas partir automatiquement à l’arrêt de session');
+  });
+
+  test('elle s’appuie sur le condensé d’événements, pas sur le transcript brut', () => {
+    const review = serviceWorker.match(/async function runSessionReview[\s\S]*?\n}/);
+    assert.match(review[0], /buildReviewDigest/);
+    assert.doesNotMatch(review[0], /contextText|sentenceWindow/,
+      'la revue ne doit pas consommer le transcript brut');
+  });
+
+  test('les constats sont filtrés avant d’être renvoyés', () => {
+    const review = serviceWorker.match(/async function runSessionReview[\s\S]*?\n}/);
+    assert.match(review[0], /validateReviewFindings/,
+      'les constats non étayés doivent être écartés côté code, pas laissés au modèle');
+  });
+
+  test('le prompt impose neutralité et citation exacte', () => {
+    assert.match(serviceWorker, /NEUTRALITY/i);
+    assert.match(serviceWorker, /Never infer intent/i);
+    assert.match(serviceWorker, /PRECISION OVER RECALL/i);
+    assert.match(serviceWorker, /verbatim/i);
+  });
+
+  test('le prompt n’autorise que les trois procédés retenus', () => {
+    assert.match(serviceWorker, /FALSE_DILEMMA \| WHATABOUTISM \| AD_HOMINEM/);
   });
 });
 
