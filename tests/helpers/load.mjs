@@ -132,6 +132,7 @@ const SW_EXPORTS = `{
   looksLikeTranscriptionNoise, normalizeSpeakerLabel, learnSpeakerMapping, matchKnownParticipant,
   normalizeVerdictItem, cleanPersonName, TITLE_NON_NAMES,
   canonicalSpeakerName, TOPIC_LOW_SIGNAL,
+  stripSourceReferences,
   normalizeClaimKey, languageInstruction, LANGUAGE_NAMES, LANGUAGE_LOCALE
 }`;
 
