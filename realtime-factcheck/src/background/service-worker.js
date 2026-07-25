@@ -2471,6 +2471,92 @@ function resolveDismissivePronouns(text, speakerName, opponentName) {
   return t;
 }
 
+// ── Rejet du bruit de transcription ─────────────────────────────────────────
+// La transcription en direct produit des phrases tronquées ou mal reconnues.
+// Les vérifier coûte un appel LLM et une requête de recherche pour un
+// « INVÉRIFIABLE » certain, et encombre le rapport. On les écarte avant le
+// passage sourcé — précision d'abord : on ne rejette que les cas nets.
+
+// Phrase qui s'achève sur un mot-outil : le segment a été coupé.
+const DANGLING_TAIL = /\b(de|des|du|à|au|aux|en|et|ou|que|qui|dans|pour|sur|avec|par|sans|sous|vers|chez|mon|ma|mes|ton|ta|tes|son|sa|ses|notre|nos|votre|vos|leur|leurs|le|la|les|un|une|ce|cet|cette|ces|of|the|to|in|on|for|with|and|or|their|our|its)\s*[.,;!]?$/i;
+
+function looksLikeTranscriptionNoise(text) {
+  const t = String(text || '').trim();
+  if (!t) return true;
+
+  // Une question n'est pas une affirmation vérifiable.
+  if (/\?\s*$/.test(t)) return true;
+
+  // Segment coupé en plein milieu.
+  if (DANGLING_TAIL.test(t)) return true;
+
+  const words = t.match(/[\p{L}\d]+/gu) || [];
+  if (words.length < 4) return true;              // trop court pour porter un fait
+
+  // Suite de chiffres sans énoncé autour. Seuil volontairement bas : une
+  // affirmation chiffrée courte (« L'inflation a culminé à 9,1 % en 2022 »)
+  // est précisément le genre de fait qu'on veut vérifier.
+  const lettered = words.filter(w => /[\p{L}]{3,}/u.test(w));
+  if (lettered.length < 2) return true;
+
+  return false;
+}
+
+// ── Normalisation des libellés de locuteur ──────────────────────────────────
+// Le modèle renvoie « Unknown » quand il ne sait pas ; la diarisation renvoie
+// « Speaker 0 ». Sans normalisation, le rapport crée un groupe par variante
+// (« Unknown » et « Inconnu » côte à côte).
+const UNKNOWN_SPEAKER_LABELS = new Set([
+  'unknown', 'inconnu', 'inconnue', 'other', 'autre', 'n/a', 'na', 'none', 'null', '?',
+]);
+
+function normalizeSpeakerLabel(name) {
+  const raw = String(name == null ? '' : name).trim();
+  if (!raw) return null;
+  if (/^speaker\s*\d+$/i.test(raw)) return null;
+  if (/^locuteur\s*\d+$/i.test(raw)) return null;
+  if (UNKNOWN_SPEAKER_LABELS.has(raw.toLowerCase())) return null;
+  return raw;
+}
+
+// ── Apprentissage de la correspondance locuteur ─────────────────────────────
+// La diarisation fournit des identifiants stables mais anonymes ; le modèle
+// parvient parfois à nommer le locuteur d'après le contenu. Quand ce nom
+// correspond à un participant annoncé dans le titre, on retient la
+// correspondance : les prises de parole suivantes du même identifiant sont
+// alors attribuées sans nouvelle inférence.
+
+function matchKnownParticipant(name, participants) {
+  const clean = normalizeSpeakerLabel(name);
+  if (!clean) return null;
+  const low = clean.toLowerCase();
+  for (const p of (participants || [])) {
+    const pl = String(p).toLowerCase();
+    if (pl === low) return p;
+    const lastName = pl.split(/\s+/).pop();
+    if (lastName.length > 3 && (low.includes(lastName) || pl.includes(low))) return p;
+  }
+  return null;
+}
+
+/**
+ * Retourne la correspondance à retenir, ou null.
+ * On n'écrase jamais une confirmation de l'utilisateur ni une correspondance
+ * déjà apprise : la première attribution fiable fait foi.
+ */
+function learnSpeakerMapping(speakerId, llmName, participants, existingMap) {
+  if (speakerId === null || speakerId === undefined) return null;
+  const key = String(speakerId);
+  if (existingMap && existingMap[key]) return null;
+  const matched = matchKnownParticipant(llmName, participants);
+  if (!matched) return null;
+  // Un même nom ne peut pas désigner deux identifiants différents.
+  for (const [id, n] of Object.entries(existingMap || {})) {
+    if (id !== key && n === matched) return null;
+  }
+  return { id: key, name: matched };
+}
+
 async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapshot, dominantSpeaker, dominantSpeakerId) {
   analysisAttemptCount++;
   setAnalysisDebug('evaluate_started', {
@@ -2606,7 +2692,14 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
     }
 
     const invalidShapeCount = results.filter(r => !r || !r.claim || !r.verdict).length;
-    const valid = results.filter(r => r && r.claim && r.verdict && !isDuplicate(r.claim));
+    const noisy = results.filter(r => r && r.claim && looksLikeTranscriptionNoise(r.claim));
+    if (noisy.length) {
+      console.log('[pipeline] bruit de transcription écarté :', noisy.length,
+        '—', noisy.map(r => r.claim.slice(0, 40)).join(' | '));
+    }
+
+    const valid = results.filter(r =>
+      r && r.claim && r.verdict && !looksLikeTranscriptionNoise(r.claim) && !isDuplicate(r.claim));
 
     if (!valid.length) {
       const message = invalidShapeCount
@@ -2629,7 +2722,7 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       lexical:            lexicalSnapshot,
       speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot),
       dominantSpeakerId,
-      speaker:            dominantSpeaker || (r.speaker && !r.speaker.match(/^Speaker\s*\d+$/i) ? r.speaker : null),
+      speaker:            normalizeSpeakerLabel(dominantSpeaker) || normalizeSpeakerLabel(r.speaker),
     }));
 
     recordClaimResults(fastPayload);
@@ -2928,7 +3021,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
             pending: false,
             lexical: lexicalSnapshot,
             speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot),
-            speaker: dominantSpeaker || (fastResult.speaker && !fastResult.speaker.match(/^Speaker\s*\d+$/i) ? fastResult.speaker : null),
+            speaker: normalizeSpeakerLabel(dominantSpeaker) || normalizeSpeakerLabel(fastResult.speaker),
             dominantSpeakerId,
           };
         }
@@ -2944,7 +3037,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
             'llm',
             { fatal: false }
           );
-          return { ...fastResult, sources: safeUrls, pending: false, lexical: lexicalSnapshot, speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot), speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
+          return { ...fastResult, sources: safeUrls, pending: false, lexical: lexicalSnapshot, speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot), speaker: normalizeSpeakerLabel(dominantSpeaker) || normalizeSpeakerLabel(fastResult.speaker), dominantSpeakerId };
         }
 
         const results = normalizeVerdictResults(parsed.results);
@@ -2956,15 +3049,37 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
             'llm',
             { fatal: false }
           );
-          return { ...fastResult, sources: safeUrls, pending: false, lexical: lexicalSnapshot, speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot), speaker: dominantSpeaker || fastResult.speaker || null, dominantSpeakerId };
+          return { ...fastResult, sources: safeUrls, pending: false, lexical: lexicalSnapshot, speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot), speaker: normalizeSpeakerLabel(dominantSpeaker) || normalizeSpeakerLabel(fastResult.speaker), dominantSpeakerId };
         }
         const lateResolved = dominantSpeakerId !== null && dominantSpeakerId !== undefined
           ? speakerIdToName[dominantSpeakerId] || null
           : null;
-        const resolvedSpeaker = lateResolved
-          || dominantSpeaker
-          || (match.speaker && !match.speaker.match(/^Speaker\s*\d+$/i) ? match.speaker : null)
-          || (fastResult.speaker && !fastResult.speaker.match(/^Speaker\s*\d+$/i) ? fastResult.speaker : null);
+        // Le modèle a parfois su nommer le locuteur : si ce nom correspond à un
+        // participant annoncé, on retient la correspondance pour la suite de la
+        // session — les prises de parole suivantes n'auront plus à être devinées.
+        const learned = learnSpeakerMapping(
+          dominantSpeakerId, match.speaker, parseSpeakersFromTitle(title || ''), speakerIdToName);
+        if (learned) {
+          speakerIdToName[learned.id] = learned.name;
+          console.log('[locuteurs] correspondance apprise :', learned.id, '→', learned.name);
+          if (activeTabId) {
+            browserAPI.tabs.sendMessage(activeTabId, {
+              type: 'SPEAKER_LEARNED', speakerIdToName: { [learned.id]: learned.name },
+            }).catch(() => {});
+          }
+          if (currentSession) {
+            sessionSafe('locuteurs', () => {
+              setSessionSpeakers(currentSession, { [learned.id]: learned.name });
+              scheduleSessionSave(currentSession);
+            });
+          }
+        }
+
+        const resolvedSpeaker = normalizeSpeakerLabel(learned && learned.name)
+          || normalizeSpeakerLabel(lateResolved)
+          || normalizeSpeakerLabel(dominantSpeaker)
+          || normalizeSpeakerLabel(match.speaker)
+          || normalizeSpeakerLabel(fastResult.speaker);
 
         const fastWasTrue = fastResult.verdict === 'TRUE' || fastResult.verdict === 'SUBSTANTIALLY TRUE';
         const groundedIsMisleading = match.verdict === 'MISLEADING';
