@@ -161,6 +161,45 @@ describe('revue de session — garde-fous', () => {
   });
 });
 
+describe('langue de sortie — pièges connus', () => {
+  test('la revue utilise sa propre consigne de langue', () => {
+    const review = serviceWorker.match(/async function runSessionReview[\s\S]*?\n}/);
+    assert.match(review[0], /reviewLanguageInstruction\(\)/,
+      'la consigne des verdicts nomme des champs absents du schéma de revue');
+    assert.doesNotMatch(review[0], /[^w]languageInstruction\(\)/,
+      'la revue ne doit pas réutiliser la consigne des verdicts');
+  });
+
+  test('la consigne de revue nomme les champs qui existent vraiment', () => {
+    const fn = serviceWorker.match(/function reviewLanguageInstruction[\s\S]*?\n}/);
+    assert.ok(fn, 'reviewLanguageInstruction introuvable');
+    for (const field of ['summary', 'patterns', 'criterion', 'unresolved']) {
+      assert.match(fn[0], new RegExp(field), `champ ${field} absent de la consigne`);
+    }
+  });
+
+  test('les citations ne doivent jamais être traduites', () => {
+    const fn = serviceWorker.match(/function reviewLanguageInstruction[\s\S]*?\n}/);
+    assert.match(fn[0], /never translate/i,
+      'traduire une citation la rendrait introuvable dans le transcript');
+  });
+});
+
+describe('corroboration — base de calcul du garde-fou', () => {
+  test('le garde-fou s’appuie sur les sources réellement citées', () => {
+    const ground = serviceWorker.match(/async function groundAndUpdate[\s\S]*?\n}\n/);
+    assert.ok(ground);
+    assert.match(ground[0], /const citedItems[\s\S]{0,200}computeCorroboration\(citedItems\)/,
+      'sans recalcul sur les sources citées, une source affichée peut coexister avec « 0 voix »');
+    assert.match(ground[0], /applyCorroborationGuard\(finalVerdict, match\.confidence, finalCorroboration\)/);
+  });
+
+  test('la corroboration renvoyée est celle qui a servi au garde-fou', () => {
+    assert.match(serviceWorker, /corroboration: finalCorroboration/,
+      'le rapport doit refléter la corroboration réellement appliquée');
+  });
+});
+
 describe('reprise du panneau sans recharger la page', () => {
   test('un démarrage sur session active rattache au lieu de ne rien faire', () => {
     const start = serviceWorker.match(/async function startFactCheck[\s\S]*?\n}/);
