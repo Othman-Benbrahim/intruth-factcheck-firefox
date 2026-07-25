@@ -131,6 +131,7 @@ const SW_EXPORTS = `{
   isTopicallyRelevant, filterTitleMatchSensors, topicTokens, TITLE_MATCH_SENSORS,
   looksLikeTranscriptionNoise, normalizeSpeakerLabel, learnSpeakerMapping, matchKnownParticipant,
   normalizeVerdictItem, cleanPersonName, TITLE_NON_NAMES,
+  canonicalSpeakerName, TOPIC_LOW_SIGNAL,
   normalizeClaimKey, languageInstruction, LANGUAGE_NAMES, LANGUAGE_LOCALE
 }`;
 
