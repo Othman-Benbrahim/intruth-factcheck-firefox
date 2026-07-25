@@ -1509,6 +1509,16 @@ chrome.runtime.onMessage.addListener((msg) => {
       clearRuntimeErrorStorage();
       break;
 
+    case 'SPEAKER_LEARNED':
+      // Le background a déduit qui parle : on l'applique aux cartes déjà posées.
+      if (msg.speakerIdToName) {
+        for (const [id, name] of Object.entries(msg.speakerIdToName)) {
+          if (name && !(id in confirmedSpeakerMap)) confirmedSpeakerMap[id] = name;
+        }
+        retryTagAllCards();
+      }
+      break;
+
     case 'RESTORE_SESSION':
       // La page a été rechargée en cours de session : on remonte le panneau et
       // on réaffiche l'historique conservé par le background.
