@@ -4,7 +4,9 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadServiceWorker } from './helpers/load.mjs';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { loadServiceWorker, REPO_ROOT } from './helpers/load.mjs';
 
 const sw = loadServiceWorker();
 
@@ -83,6 +85,95 @@ describe('selectCitedSources', () => {
 
   test('aucune preuve → aucune source', () => {
     assert.deepEqual(sw.selectCitedSources({}, { items: [] }, 'chomage'), []);
+  });
+});
+
+describe('pertinence des capteurs à correspondance de titre', () => {
+  // Cas relevés dans un rapport réel : Wikipédia répondait par titre approchant
+  // et ramenait des articles sans rapport, qui étaient ensuite affichés comme
+  // sources ET comptés comme voix indépendantes dans la corroboration.
+  const wiki = (title, snippet) => ({
+    source: 'wikipedia', title, snippet: snippet || title,
+    link: 'https://fr.wikipedia.org/wiki/' + encodeURIComponent(title),
+  });
+
+  const HORS_SUJET = [
+    ["J'ai critiqué la cérémonie d'inauguration des Jeux Olympiques comme vulgaire", 'Indochine (groupe)'],
+    ['Une civilisation est en train de nous remplacer', 'La Montagne entre nous'],
+    ["On a besoin d'immigrer pour travailler", 'The Cleaning Lady'],
+    ['Renault va fermer les yeux', 'Carlos Ghosn'],
+    ['Cinquante mille, ça ne fait même pas dix pour cent', 'Attentat du 14 juillet 2016 à Nice'],
+  ];
+
+  const PERTINENTS = [
+    ["On a besoin d'immigrer pour travailler", 'Immigration en France'],
+    ["Les Chinois avaient de l'avance dans l'industrie de la voiture électrique", 'Voiture électrique en France'],
+    ["L'Islam est une civilisation", 'Civilisation islamique'],
+    ["Les politiques ont favorisé l'extrême diversité avec l'invasion islamique', 'Islam en France"],
+  ];
+
+  for (const [claim, title] of HORS_SUJET) {
+    test(`« ${title} » est écarté`, () => {
+      assert.equal(sw.isTopicallyRelevant(claim, wiki(title)), false);
+    });
+  }
+
+  test('« Immigration en France » est conservé (morphologie tolérée)', () => {
+    assert.equal(sw.isTopicallyRelevant("On a besoin d'immigrer pour travailler", wiki('Immigration en France')), true);
+  });
+
+  test('« Voiture électrique en France » est conservé', () => {
+    assert.equal(sw.isTopicallyRelevant(
+      "Les Chinois avaient de l'avance dans l'industrie de la voiture électrique",
+      wiki('Voiture électrique en France')), true);
+  });
+
+  test('« Islam en France » est conservé malgré une affirmation longue', () => {
+    assert.equal(sw.isTopicallyRelevant(
+      "Les politiques ont favorisé l'extrême diversité avec l'invasion islamique",
+      wiki('Islam en France')), true);
+  });
+
+  test('un titre elliptique est rattrapé par son résumé', () => {
+    assert.equal(sw.isTopicallyRelevant(
+      'Les protestants ont été perçus de la même manière',
+      wiki('Louis XIII', 'Louis XIII roi de France, révocation des protestants et siège de La Rochelle')), true);
+  });
+
+  test('les mots vides ne suffisent jamais à établir la pertinence', () => {
+    const tokens = sw.topicTokens('nous vous pour avec dans cette comme entre');
+    assert.equal(tokens.size, 0);
+  });
+
+  test('seuls les capteurs cherchant par titre sont filtrés', () => {
+    assert.ok(sw.TITLE_MATCH_SENSORS.has('wikipedia'));
+    assert.ok(sw.TITLE_MATCH_SENSORS.has('wikidata'));
+    assert.equal(sw.TITLE_MATCH_SENSORS.has('web'), false);
+    assert.equal(sw.TITLE_MATCH_SENSORS.has('worldbank'), false);
+  });
+
+  test('le filtre laisse passer les autres capteurs sans les juger', () => {
+    const items = [
+      { source: 'web', title: 'sans rapport du tout', snippet: 'rien', link: 'https://a.com/1' },
+      wiki('Indochine (groupe)'),
+    ];
+    const kept = sw.filterTitleMatchSensors('une affirmation sur les jeux olympiques', items);
+    assert.equal(kept.length, 1);
+    assert.equal(kept[0].source, 'web');
+  });
+
+  test('une affirmation trop courte ne fait écarter personne', () => {
+    assert.equal(sw.isTopicallyRelevant('oui', wiki('Indochine (groupe)')), true);
+  });
+
+  test('le filtre est réellement appliqué à la collecte des preuves', () => {
+    // Sans cette vérification, retirer l'appel dans gatherEvidence passerait
+    // inaperçu : les fonctions resteraient correctes mais inutilisées.
+    const src = readFileSync(join(REPO_ROOT, 'realtime-factcheck', 'src', 'background', 'service-worker.js'), 'utf8');
+    const fn = src.match(/async function gatherEvidence[\s\S]*?\n}/);
+    assert.ok(fn, 'gatherEvidence introuvable');
+    assert.match(fn[0], /filterTitleMatchSensors\(/,
+      'un article hors sujet doit être écarté avant de compter comme voix indépendante');
   });
 });
 
