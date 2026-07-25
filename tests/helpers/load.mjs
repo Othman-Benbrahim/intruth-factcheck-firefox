@@ -147,6 +147,8 @@ const SESSION_EXPORTS = `{
   createSession, endSession, isSessionActive,
   findClaimEvent, claimEventFromResult, upsertClaimEvent, setSessionSpeakers,
   sessionSummary, serializeSession, deserializeSession,
+  buildReviewDigest, canReviewSession, validateReviewFindings, quoteIsGrounded,
+  REVIEW_FALLACY_TYPES, REVIEW_MIN_EVENTS, REVIEW_MAX_EVENTS,
   saveSessionNow, loadStoredSession, clearStoredSession
 }`;
 
