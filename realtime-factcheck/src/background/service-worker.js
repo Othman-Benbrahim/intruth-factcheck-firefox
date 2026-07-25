@@ -922,6 +922,152 @@ async function fetchEspn(query) {
   return out.slice(0, 4);
 }
 
+// ── JusticeLibre — droit français consolidé (sans clé) ──────────────────────
+// Relais libre (MIT) des bulks officiels DILA : codes et lois consolidés,
+// Journal officiel. Il remplace l'accès Légifrance/PISTE, écarté parce qu'il
+// exigeait un compte et un échange OAuth2 hors de portée d'un utilisateur
+// ordinaire.
+//
+// L'accès se fait en MCP (JSON-RPC sur HTTP), pas en REST : on implémente donc
+// le strict minimum du protocole. Toute défaillance renvoie [] — jamais une
+// erreur remontée au pipeline.
+
+const JUSTICELIBRE_ENDPOINT = 'https://justicelibre.org/mcp';
+const JUSTICELIBRE_TIMEOUT_MS = 7000;
+
+// Marqueurs de droit français : sans eux, une affirmation juridique
+// européenne ou américaine déclencherait aussi ce capteur.
+const FR_LAW_MARKERS = /(?:\b(?:assembl[ée]e nationale|s[ée]nat|journal officiel|conseil constitutionnel|conseil d['’][ée]tat|cour de cassation|l[ée]gifrance|gouvernement fran[çc]ais|loi fran[çc]aise|premier ministre|parlement fran[çc]ais|code (?:civil|p[ée]nal|du travail|de commerce|de la sant[ée] publique|de la route|de l['’][ée]ducation)|prud['’]homme\w*|d[ée]cret|arr[êe]t[ée] minist[ée]riel|ordonnance)\b)|(?:\bloi\s+n[°o]?\s*\d)|(?:\barticle\s+[LRD]\.?\s*\d)/i;
+
+let mcpSessionId = null;
+
+/** Réponse MCP : JSON simple ou flux d'événements. Les deux sont acceptés. */
+async function readMcpBody(res) {
+  const type = (res.headers.get('content-type') || '').toLowerCase();
+  const raw = await res.text();
+  if (!raw) return null;
+  if (!type.includes('event-stream')) {
+    try { return JSON.parse(raw); } catch (_) { return null; }
+  }
+  // flux SSE : on retient le dernier bloc « data: » exploitable
+  let last = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') continue;
+    try { last = JSON.parse(payload); } catch (_) { /* fragment partiel */ }
+  }
+  return last;
+}
+
+async function mcpRequest(body, extraHeaders) {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), JUSTICELIBRE_TIMEOUT_MS) : null;
+  try {
+    const res = await fetch(JUSTICELIBRE_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+        ...(mcpSessionId ? { 'Mcp-Session-Id': mcpSessionId } : {}),
+        ...(extraHeaders || {}),
+      },
+      body: JSON.stringify(body),
+      signal: controller?.signal,
+    });
+    const sid = res.headers.get('mcp-session-id');
+    if (sid) mcpSessionId = sid;
+    return { ok: res.ok, status: res.status, data: await readMcpBody(res) };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Poignée de main MCP, effectuée seulement si le serveur l'exige. */
+async function mcpHandshake() {
+  mcpSessionId = null;
+  const init = await mcpRequest({
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'intruth', version: '2.1.0' },
+    },
+  });
+  if (!init.ok || !mcpSessionId) return false;
+  await mcpRequest({ jsonrpc: '2.0', method: 'notifications/initialized' }).catch(() => {});
+  return true;
+}
+
+/** Appelle un outil MCP. Tente sans session, puis avec, une seule fois. */
+async function mcpCallTool(name, args, retried) {
+  const body = {
+    jsonrpc: '2.0', id: Date.now() % 100000,
+    method: 'tools/call',
+    params: { name, arguments: args },
+  };
+  const res = await mcpRequest(body);
+
+  const needsSession = !res.ok || (res.data && res.data.error);
+  if (needsSession && !retried) {
+    if (await mcpHandshake()) return mcpCallTool(name, args, true);
+    return null;
+  }
+  if (!res.data || res.data.error) return null;
+
+  const result = res.data.result;
+  if (!result || result.isError) return null;
+  if (result.structuredContent) return result.structuredContent;
+
+  // repli : le contenu textuel porte le JSON
+  const text = Array.isArray(result.content)
+    ? result.content.map(c => (c && c.type === 'text' ? c.text : '')).join('')
+    : '';
+  try { return JSON.parse(text); } catch (_) { return null; }
+}
+
+/** URL canonique Légifrance d'un article, pour vérification humaine. */
+function legifranceArticleUrl(article) {
+  const id = article && (article.legiarti || article.id);
+  if (!id) return 'https://www.legifrance.gouv.fr/';
+  // Les codes vivent sous /codes/, les lois non codifiées sous /loda/.
+  const titre = String(article.titre_section || '').toLowerCase();
+  const section = /\bcode\b/.test(titre) ? 'codes' : 'loda';
+  return `https://www.legifrance.gouv.fr/${section}/article_lc/${id}`;
+}
+
+/** Mots-clés utiles pour la recherche plein texte, sans le bavardage oral. */
+function frenchLawTerms(query) {
+  return (String(query || '').toLowerCase().match(/[a-zà-ÿ]{4,}/gi) || [])
+    .filter(t => !TOPIC_STOPWORDS.has(t.normalize('NFD').replace(/[\u0300-\u036f]/g, '')))
+    .slice(0, 6);
+}
+
+async function fetchJusticeLibre(query) {
+  const terms = frenchLawTerms(query);
+  if (!terms.length) return [];
+  try {
+    const data = await mcpCallTool('search_legi', { query: terms.join(' '), limit: 5 });
+    const articles = (data && Array.isArray(data.articles)) ? data.articles : [];
+    return articles.map(a => {
+      const num = a.num ? `Article ${a.num}` : 'Article';
+      const titre = String(a.titre_section || '').trim();
+      const etat = a.etat ? ` · ${String(a.etat).toLowerCase()}` : '';
+      const date = a.date_debut ? ` · en vigueur depuis le ${String(a.date_debut).slice(0, 10)}` : '';
+      const extrait = String(a.extract || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+      return {
+        source:  'justicelibre',
+        title:   titre ? `${num} — ${titre}` : num,
+        snippet: `${extrait}${etat}${date} · droit français consolidé`.trim(),
+        link:    legifranceArticleUrl(a),
+      };
+    }).filter(it => it.title && it.link).slice(0, 4);
+  } catch (err) {
+    console.error('[justicelibre] indisponible :', err && err.message);
+    return [];
+  }
+}
+
 // ── EUR-Lex — droit de l'Union européenne (sans clé) ─────────────────────────
 // Table d'actes notoires (déterministe, sans réseau) + recherche SPARQL CELLAR
 // en complément « meilleur effort ». Dégradation propre si CELLAR est indispo.
@@ -1346,6 +1492,11 @@ function routeSensors(text) {
   const isLaw = SENSOR_KEYWORDS.law.test(t);
   if ((isLaw && EU_MARKERS.test(t)) || matchEuKnownActs(t).length) sensors.add('eurlex');
   if (US_MARKERS.test(t)) sensors.add('fedreg');
+  // Droit français : marqueurs explicites, ou affirmation juridique sans
+  // marqueur étranger — usage principal de l'extension.
+  if (FR_LAW_MARKERS.test(t) || (isLaw && !EU_MARKERS.test(t) && !US_MARKERS.test(t))) {
+    sensors.add('justicelibre');
+  }
   // Sources à clé : tentées si la clé est présente (sinon court-circuit interne)
   sensors.add('web');
   sensors.add('factcheck');
@@ -1379,6 +1530,7 @@ function buildEvidenceText(items) {
     s === 'espn'        ? 'Résultat sportif (ESPN)' :
     s === 'eurlex'      ? "Droit de l'UE (EUR-Lex)" :
     s === 'fedreg'      ? 'Registre fédéral US (Federal Register)' :
+    s === 'justicelibre' ? 'Droit français (Légifrance via JusticeLibre)' :
     s === 'factcheck'   ? 'Fact-check existant' : 'Source';
   return items.map((it, i) => {
     let domain = '';
@@ -1405,6 +1557,7 @@ async function gatherEvidence(queries) {
   if (sensors.has('gdelt'))     tasks.push(cachedSensor('gdelt',     q0, () => fetchGdelt(q0)));
   if (sensors.has('eurlex'))    tasks.push(cachedSensor('eurlex',    routeText, () => fetchEurLex(routeText)));
   if (sensors.has('fedreg'))    tasks.push(cachedSensor('fedreg',    routeText, () => fetchFederalRegister(routeText)));
+  if (sensors.has('justicelibre')) tasks.push(cachedSensor('justicelibre', routeText, () => fetchJusticeLibre(routeText)));
   if (sensors.has('espn'))      tasks.push(cachedSensor('espn',      q0, () => fetchEspn(q0)));
   if (sensors.has('europepmc')) tasks.push(cachedSensor('europepmc', q0, () => fetchEuropePmc(q0)));
   if (sensors.has('openalex'))  tasks.push(cachedSensor('openalex',  q0, () => fetchOpenAlex(q0)));
@@ -2896,7 +3049,7 @@ function jaccardSim(a, b) {
 
 // Crédibilité par TYPE de capteur (signaux, jamais réputation média). 0..1.
 const SOURCE_CREDIBILITY = {
-  worldbank: 1.0, eurlex: 1.0, fedreg: 1.0, crossref: 0.95, openalex: 0.9, europepmc: 0.9,
+  worldbank: 1.0, eurlex: 1.0, fedreg: 1.0, justicelibre: 0.9, crossref: 0.95, openalex: 0.9, europepmc: 0.9,
   factcheck: 0.85, espn: 0.85, wikidata: 0.75, wikipedia: 0.7,
   gdelt: 0.5, web: 0.5,
 };
@@ -2905,7 +3058,7 @@ function sourceCredibility(src) {
 }
 
 // Sources « primaires / officielles » : leur seule présence sort de FAIBLE.
-const CORRO_PRIMARY = new Set(['worldbank', 'eurlex', 'fedreg', 'crossref', 'openalex', 'europepmc', 'factcheck']);
+const CORRO_PRIMARY = new Set(['worldbank', 'eurlex', 'fedreg', 'justicelibre', 'crossref', 'openalex', 'europepmc', 'factcheck']);
 
 // Union-find : deux items dans la même voix si même domaine OU quasi-doublon lexical.
 function clusterEvidence(items, threshold) {
