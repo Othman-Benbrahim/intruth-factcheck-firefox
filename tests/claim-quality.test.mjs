@@ -206,6 +206,39 @@ describe('variantes du nom d’un même locuteur', () => {
     assert.equal(sw.canonicalSpeakerName('M. Zemmour', { '1': 'Zemmour' }), 'Zemmour');
   });
 
+  test('les participants du titre servent de référence dès le départ', () => {
+    // Sans eux, « Marion Maréchal » restait tel quel tant qu'aucune
+    // correspondance n'avait été apprise : le rapport affichait deux groupes
+    // (« Marion Maréchal » et « Maréchal ») pour la même personne.
+    const titre = 'Immigration, Laïcité, voile : Marion Maréchal face à Marine Tondelier｜LCI - YouTube';
+    const participants = sw.parseSpeakersFromTitle(titre);
+    assert.deepEqual(participants, ['Maréchal', 'Tondelier']);
+
+    for (const variante of ['Marion Maréchal', 'Maréchal', 'Mme Maréchal']) {
+      assert.equal(sw.canonicalSpeakerName(variante, {}, participants), 'Maréchal',
+        `« ${variante} » doit converger vers « Maréchal »`);
+    }
+    for (const variante of ['Marine Tondelier', 'Tondelier']) {
+      assert.equal(sw.canonicalSpeakerName(variante, {}, participants), 'Tondelier');
+    }
+  });
+
+  test('un intervenant absent du titre garde son nom', () => {
+    assert.equal(sw.canonicalSpeakerName('Macron', {}, ['Maréchal', 'Tondelier']), 'Macron');
+  });
+
+  test('les libellés vides restent neutralisés même avec des participants', () => {
+    assert.equal(sw.canonicalSpeakerName('Unknown', {}, ['Maréchal']), null);
+    assert.equal(sw.canonicalSpeakerName('Speaker 0', {}, ['Maréchal']), null);
+  });
+
+  test('la passe rapide canonise aussi, pas seulement la passe sourcée', () => {
+    const fast = serviceWorkerSrc.match(/const fastPayload = valid\.map[\s\S]{0,600}?\}\)\);/);
+    assert.ok(fast, 'construction du verdict rapide introuvable');
+    assert.match(fast[0], /canonicalSpeakerName\([\s\S]{0,80}titleNames\)/,
+      'sinon le premier libellé affiché reste la forme longue');
+  });
+
   test('un nom déjà canonique est inchangé', () => {
     assert.equal(sw.canonicalSpeakerName('Mélenchon', { '0': 'Mélenchon' }), 'Mélenchon');
   });
