@@ -77,6 +77,45 @@ describe('messages attendus par le content script', () => {
   });
 });
 
+describe('détection du discours — garde-fous', () => {
+  test('la fonctionnalité est désactivée par défaut côté background', () => {
+    assert.match(serviceWorker, /let DISCOURSE_ENABLED = false/,
+      'le drapeau doit valoir false par défaut');
+  });
+
+  test('la consigne n’est envoyée au modèle que si le drapeau est actif', () => {
+    const fn = serviceWorker.match(/function discourseInstruction\(\)[\s\S]*?\n}/);
+    assert.ok(fn, 'discourseInstruction introuvable');
+    assert.match(fn[0], /if \(!DISCOURSE_ENABLED\) return ''/,
+      'la consigne doit être vide quand la détection est désactivée');
+  });
+
+  test('aucun appel LLM supplémentaire : la consigne rejoint le prompt existant', () => {
+    const calls = (serviceWorker.match(/await callLLM\(/g) || []).length;
+    assert.equal(calls, 2, `attendu 2 appels LLM (rapide + sourcé), trouvé ${calls}`);
+    assert.match(serviceWorker, /\$\{languageInstruction\(\)\}\$\{discourseInstruction\(\)\}/,
+      'la consigne de discours doit être ajoutée au prompt rapide existant');
+  });
+
+  test('la séparation précède la normalisation des verdicts', () => {
+    const iSplit = serviceWorker.indexOf('splitDiscourseItems(parsed.results)');
+    const iNorm  = serviceWorker.indexOf('normalizeVerdictResults(split.claims)');
+    assert.ok(iSplit > 0 && iNorm > iSplit,
+      'les énoncés de discours doivent être écartés avant toute normalisation de verdict');
+  });
+
+  test('le discours ne passe pas par la vérification sourcée', () => {
+    const ground = serviceWorker.match(/async function groundAndUpdate[\s\S]*?\n}/);
+    assert.ok(ground, 'groundAndUpdate introuvable');
+    assert.doesNotMatch(ground[0], /PREDICTION|COMMITMENT|discourse/i,
+      'la vérification sourcée ne doit jamais traiter un énoncé de discours');
+  });
+
+  test('le prompt interdit explicitement de juger ces énoncés', () => {
+    assert.match(serviceWorker, /NEVER give them a verdict/i);
+  });
+});
+
 describe('ordre des content scripts', () => {
   const js = manifest.content_scripts[0].js;
 
