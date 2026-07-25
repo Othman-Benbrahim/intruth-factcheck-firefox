@@ -2588,10 +2588,17 @@ const UNKNOWN_SPEAKER_LABELS = new Set([
 
 // Le modèle alterne « Mélenchon » et « Jean-Luc Mélenchon » : sans réduction au
 // nom déjà retenu, le rapport crée deux libellés pour la même personne.
-function canonicalSpeakerName(name, knownNames) {
+function canonicalSpeakerName(name, knownNames, participants) {
   const clean = normalizeSpeakerLabel(name);
   if (!clean) return null;
-  const known = Object.values(knownNames || {}).filter(Boolean);
+  // Les participants du titre servent de référence dès le départ : sans eux,
+  // « Marion Maréchal » restait tel quel tant qu'aucune correspondance n'avait
+  // été apprise, puis coexistait avec « Maréchal » — deux groupes pour une
+  // même personne dans le rapport.
+  const known = [
+    ...Object.values(knownNames || {}),
+    ...(Array.isArray(participants) ? participants : []),
+  ].filter(Boolean);
   return matchKnownParticipant(clean, known) || clean;
 }
 
@@ -2754,7 +2761,8 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       const enriched = usable.map(it => ({
         ...it,
         statement: String(it.statement || '').replace(/^\[[^\]]{1,40}\]\s*/, '').trim(),
-        speaker:   canonicalSpeakerName(it.speaker, speakerIdToName) || normalizeSpeakerLabel(dominantSpeaker),
+        speaker:   canonicalSpeakerName(it.speaker, speakerIdToName, parseSpeakersFromTitle(title || ''))
+                     || normalizeSpeakerLabel(dominantSpeaker),
         speakerId: dominantSpeakerId ?? null,
       }));
       if (enriched.length) recordDiscourseItems(enriched);
@@ -2815,7 +2823,8 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       lexical:            lexicalSnapshot,
       speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot),
       dominantSpeakerId,
-      speaker:            normalizeSpeakerLabel(dominantSpeaker) || normalizeSpeakerLabel(r.speaker),
+      speaker:            canonicalSpeakerName(dominantSpeaker, speakerIdToName, titleNames)
+                            || canonicalSpeakerName(r.speaker, speakerIdToName, titleNames),
     }));
 
     recordClaimResults(fastPayload);
@@ -3215,11 +3224,12 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
           }
         }
 
-        const resolvedSpeaker = canonicalSpeakerName(learned && learned.name, speakerIdToName)
+        const titleParticipants = parseSpeakersFromTitle(title || '');
+        const resolvedSpeaker = canonicalSpeakerName(learned && learned.name, speakerIdToName, titleParticipants)
           || normalizeSpeakerLabel(lateResolved)
           || normalizeSpeakerLabel(dominantSpeaker)
-          || canonicalSpeakerName(match.speaker, speakerIdToName)
-          || canonicalSpeakerName(fastResult.speaker, speakerIdToName);
+          || canonicalSpeakerName(match.speaker, speakerIdToName, titleParticipants)
+          || canonicalSpeakerName(fastResult.speaker, speakerIdToName, titleParticipants);
 
         const fastWasTrue = fastResult.verdict === 'TRUE' || fastResult.verdict === 'SUBSTANTIALLY TRUE';
         const groundedIsMisleading = match.verdict === 'MISLEADING';
