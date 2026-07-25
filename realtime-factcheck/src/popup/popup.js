@@ -1,6 +1,7 @@
 // popup.js
 
 const toggleBtn    = document.getElementById('toggleBtn');
+const reattachBtn  = document.getElementById('reattachBtn');
 const statusEl     = document.getElementById('status');
 const providerEl   = document.getElementById('llmProvider');
 const endpointEl   = document.getElementById('llmEndpoint');
@@ -494,6 +495,9 @@ function setActive(active) {
   toggleBtn.textContent = active ? 'Stop Fact-Checking' : 'Start Fact-Checking';
   toggleBtn.className   = 'toggle-btn' + (active ? ' active' : '');
   keysSection.style.display = active ? 'none' : 'flex';
+  // Visible uniquement en session : permet de remonter le panneau s'il a été
+  // fermé ou perdu, sans avoir à recharger la page ni à relancer la session.
+  if (reattachBtn) reattachBtn.style.display = active ? 'block' : 'none';
 
   if (lastRuntimeError) {
     statusEl.textContent = active ? 'Erreur • IA non fonctionnelle' : 'Erreur précédente • IA non fonctionnelle';
@@ -586,3 +590,22 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     }
   }
 });
+
+// ── Rouvrir le panneau ──────────────────────────────────────────────────────
+
+if (reattachBtn) {
+  reattachBtn.addEventListener('click', () => {
+    reattachBtn.disabled = true;
+    reattachBtn.textContent = 'Rouverture…';
+    chrome.runtime.sendMessage({ type: 'REATTACH_PANEL' }, (res) => {
+      reattachBtn.disabled = false;
+      reattachBtn.textContent = 'Rouvrir le panneau';
+      if (chrome.runtime.lastError || !res || !res.reattached) {
+        keyHint.textContent = 'Panneau injoignable sur cet onglet — ouvrez la page concernée.';
+        keyHint.className   = 'key-hint error';
+        return;
+      }
+      window.close();
+    });
+  });
+}
