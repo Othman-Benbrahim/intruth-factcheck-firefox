@@ -128,6 +128,7 @@ const SW_EXPORTS = `{
   resolveDismissivePronouns, getOpponentName, speakerConfidenceFromLexical,
   extractLexical, parseSpeakersFromTitle,
   relevanceFilterItems, selectCitedSources, dedupeByLink,
+  isTopicallyRelevant, filterTitleMatchSensors, topicTokens, TITLE_MATCH_SENSORS,
   normalizeClaimKey, languageInstruction, LANGUAGE_NAMES, LANGUAGE_LOCALE
 }`;
 
