@@ -1,8 +1,8 @@
-# InTruth — Extension Firefox de fact-checking en temps réel
+# InTruth — vérification des faits en direct, pour Firefox
 
-> **Fork Firefox** du projet original [InTruth](https://github.com/rpanigrahi222/intruth-factcheck) de Risha Panigrahi, adapté pour Mozilla Firefox et **largement étendu** : LLM configurable (cloud **ou** local), moteur de recherche enfichable, galaxie de capteurs de données ouvertes, corroboration déterministe des sources, gestion des résultats sportifs, et transcription multilingue.
+> Fork Firefox du projet [InTruth](https://github.com/rpanigrahi222/intruth-factcheck) de Risha Panigrahi, considérablement étendu : galaxie de capteurs officiels, corroboration déterministe, mémoire de session, analyse du discours et revue de fin de débat.
 
-**InTruth** écoute l'audio capté par le navigateur, le transcrit en direct, détecte les affirmations factuelles au moment où elles sont prononcées, puis affiche des verdicts vérifiés dans un panneau superposé à la page. Utile sur les débats, interviews, conférences de presse, lives et prises de parole.
+InTruth écoute l'audio d'un débat, d'une interview ou d'un direct, transcrit la parole, repère les affirmations factuelles au moment où elles sont prononcées, puis affiche un verdict sourcé dans un panneau posé sur la page.
 
 La plupart des articles de fact-checking paraissent des jours après l'événement. Ici, l'évaluation se fait pendant que la vidéo tourne.
 
@@ -10,118 +10,132 @@ La plupart des articles de fact-checking paraissent des jours après l'événeme
 
 ---
 
-## ⚡ Fonctionnalités
+## Ce que fait InTruth
 
-- **Détection d'affirmations en direct** — repère en continu les affirmations factuelles vérifiables dans la parole transcrite.
-- **Verdicts en temps réel** — chaque affirmation est classée : `VRAI` · `SUBSTANTIELLEMENT VRAI` · `FAUX` · `TROMPEUR / HORS CONTEXTE` · `INVÉRIFIABLE`.
-- **Galaxie de capteurs de données** — au-delà de la recherche web, les verdicts s'appuient sur des sources **structurées, gratuites et illimitées** (encyclopédies, bases scientifiques et médicales, données officielles, actualité, résultats sportifs, fact-checks publiés). Voir plus bas.
-- **Corroboration & indépendance des sources** — un score déterministe compte les **voix réellement indépendantes** (pas les URL), détecte le *reporting circulaire* et calibre la confiance du verdict.
-- **Recherche web enfichable** — Exa (défaut), Tavily ou Serper, au choix dans le popup (BYOK). Les capteurs gratuits restent le socle même sans clé de recherche.
-- **Transcription multilingue** — Deepgram en mode multilingue (français, anglais, etc.).
-- **LLM au choix** — Anthropic (Claude) **ou** n'importe quel fournisseur **compatible OpenAI**, cloud ou local (LM Studio, Ollama…), via un menu de préréglages.
-- **Support des modèles *reasoning*** — une case dédiée adapte la requête aux modèles qui « réfléchissent » (o-series, DeepSeek-R1, etc.).
-- **Résultats sportifs** — capteur ESPN dédié (grandes ligues US + grands championnats de foot), pour éviter les erreurs de la presse en texte libre sur les scores.
-- **Attribution aux locuteurs** — suit les intervenants (diarisation Deepgram) et attribue les affirmations.
-- **Sources cliquables & filtrées** — seules les sources réellement utilisées pour le verdict sont affichées sur la carte.
-- **Export de session** — rapport récapitulatif des verdicts exportable (avec sources et horodatage).
-- **Mémorisation des clés** — au choix, clés conservées localement ou gardées uniquement pour la session en cours.
-- **Bring-Your-Own-Key (BYOK)** — vous fournissez vos propres clés API ; l'auteur n'y a aucun accès.
-- **Verdicts multilingues** — choisissez la langue de sortie (16 langues) ; les affirmations et explications sont rédigées dans cette langue, quelle que soit la langue parlée.
----
-
-## 🔧 Comment ça marche
-
-```
-Popup (réglages) ──► Background (event page Firefox)
-        │
-        ▼
-Clic « Activer la capture audio » dans le panneau (geste utilisateur requis)
-        │
-        ▼
-Content script : getUserMedia → AudioWorklet 16 kHz → PCM Int16 → fragments audio
-        │  (envoyés au background)
-        ▼
-Background : WebSocket Deepgram → transcription → détection d'affirmations (LLM)
-        │
-        ▼
-Grounding : galaxie de capteurs (web + sources structurées) en parallèle
-        │
-        ▼
-Corroboration déterministe (voix indépendantes, crédibilité) → calibrage
-        │
-        ▼
-LLM : verdict sourcé  ──►  Verdicts renvoyés au panneau superposé (overlay)
-```
-
-Le background est **agnostique de la source audio** et **du fournisseur LLM** : changer de modèle ou de moteur de recherche ne demande aucune modification de code, et la capture est isolée dans le content script.
+- **Détection en direct** des affirmations vérifiables dans la parole transcrite.
+- **Verdicts sourcés** : `VRAI` · `SUBSTANTIELLEMENT VRAI` · `FAUX` · `TROMPEUR / HORS CONTEXTE` · `INVÉRIFIABLE`.
+- **Sources officielles d'abord** : quinze capteurs, dont douze sans aucune clé — droit français et européen, registre fédéral américain, bases scientifiques et médicales, données de la Banque Mondiale, encyclopédies, actualité, résultats sportifs.
+- **Corroboration mesurée** : le nombre de *voix réellement indépendantes* est calculé, la reprise circulaire est détectée, et une affirmation mal étayée est signalée `INVÉRIFIABLE` plutôt qu'affirmée.
+- **Prédictions et engagements** relevés à part, sans jamais recevoir de verdict.
+- **Revue de session** à la demande : synthèse, constantes observées, procédés rhétoriques cités mot pour mot, affirmations restées sans vérification.
+- **Attribution des locuteurs** apprise en cours de session, sans saisie manuelle obligatoire.
+- **Multilingue** : verdicts rédigés dans la langue de votre choix (16 langues), quelle que soit la langue parlée.
+- **Mémoire de session persistante** : l'historique survit à un rechargement de page et à la mise en veille de l'extension.
+- **Export** du rapport complet en Markdown.
+- **Vos clés, vos données** (BYOK) : aucune donnée ne transite par un serveur tiers de l'auteur.
 
 ---
 
-## 🌐 La galaxie de capteurs
+## Comment ça marche
 
-Le grounding ne repose pas sur un seul moteur payant. Un **routeur** choisit, selon le sujet de l'affirmation, les capteurs pertinents et les interroge **en parallèle** (avec cache court). La plupart sont **gratuits, sans clé et illimités** — ils forment le socle des verdicts, avec ou sans clé de recherche web.
+```
+Popup (réglages)  ──►  Background
+                          │
+Panneau : « Activer la capture audio »  (geste utilisateur requis)
+                          │
+Content script : getUserMedia → AudioWorklet 16 kHz → PCM
+                          │
+Background : Deepgram (WebSocket) → transcription multilingue
+                          │
+              détection des affirmations (LLM, 1 appel)
+                          │
+        galaxie de capteurs interrogés en parallèle
+                          │
+     corroboration déterministe : voix indépendantes, crédibilité
+                          │
+              verdict sourcé (LLM, 1 appel) → panneau
+                          │
+        mémoire de session (persistée) → export · revue
+```
 
-| Capteur | Rôle | Clé requise |
+Deux appels au modèle par fenêtre d'analyse, pas davantage. La revue de session est un troisième appel, déclenché uniquement à la demande.
+
+---
+
+## La galaxie de capteurs
+
+Un routeur choisit, selon le sujet de l'affirmation, les capteurs pertinents et les interroge en parallèle, avec un cache court. **Douze sur quinze ne demandent aucune clé** : ils constituent le socle, même sans moteur de recherche configuré.
+
+| Capteur | Domaine | Clé |
 |---|---|---|
-| **Recherche web** (Exa / Tavily / Serper) | Résultats web généraux | Oui (BYOK, au choix) |
+| **JusticeLibre** | Droit français consolidé (codes, lois, JO) — liens Légifrance | Non |
+| **EUR-Lex** | Droit de l'Union européenne (CELEX) | Non |
+| **Federal Register** | Décrets et règlements fédéraux américains | Non |
+| **Banque Mondiale** | Indicateurs officiels par pays | Non |
+| **Crossref** | Publications scientifiques, **détection des rétractations** | Non |
+| **OpenAlex** | Littérature académique | Non |
+| **Europe PMC** | Biomédical, PubMed | Non |
 | **Wikipédia** (FR + EN) | Encyclopédie | Non |
 | **Wikidata** | Base de connaissances structurée | Non |
-| **GDELT** | Actualité / événements (presse mondiale) | Non |
-| **OpenAlex** | Littérature académique | Non |
-| **Crossref** | Publications + **détection des rétractations** | Non |
-| **Europe PMC** | Biomédical / PubMed | Non |
-| **Banque Mondiale** | Indicateurs officiels (pays × indicateur) | Non |
-| **Nominatim (OSM)** | Géographie / lieux | Non |
+| **GDELT** | Actualité, presse mondiale | Non |
+| **Nominatim** | Géographie, lieux | Non |
 | **ESPN** | Résultats sportifs (grandes ligues) | Non |
-| **Google Fact Check Tools** | Fact-checks déjà publiés (AFP, PolitiFact…) | Oui (facultatif) |
+| **Recherche web** | Exa, Tavily ou Serper, au choix | Oui |
+| **Google Fact Check** | Fact-checks déjà publiés (AFP, PolitiFact…) | Facultatif |
 
-> **Sport.** Les affirmations sportives sont routées vers ESPN et **exclues de GDELT** (la presse en texte libre confond pronostics et résultats). Le capteur ESPN privilégie la précision : il ne renvoie un match que si une équipe citée dans l'affirmation y figure.
+Chaque capteur est routé, jamais appelé à l'aveugle. Une affirmation sur une directive européenne va vers EUR-Lex, un décret présidentiel américain vers le Federal Register, un score de match vers ESPN — et GDELT en est écarté, la presse en texte libre confondant pronostic et résultat.
 
----
-
-## 🧭 Corroboration & indépendance des sources
-
-Compter des URL ne dit rien : cinq « sources » peuvent n'être qu'une seule dépêche recopiée. InTruth calcule donc, **de façon 100 % déterministe et sans appel LLM supplémentaire** :
-
-- **Voix indépendantes** — les résultats sont regroupés par **domaine enregistrable** (eTLD+1) **et** par **similarité lexicale** (trigrammes + Jaccard). On compte les grappes, pas les liens.
-- **Reporting circulaire** — signalé quand plusieurs résultats retombent dans une même voix.
-- **Crédibilité par type de source** — pondération par **signaux** (données officielles > publications scientifiques > fact-checks > encyclopédies > presse/web générique), jamais par réputation de média.
-
-Ce score de **robustesse** (`INSUFFISANTE / FAIBLE / MODÉRÉE / SOLIDE`) **calibre** le verdict sans jamais le gonfler :
-
-- corroboration **insuffisante** (aucune voix crédible sur le sujet) → verdict ramené à `INVÉRIFIABLE` ;
-- corroboration **faible** (une seule voix générique) → confiance plafonnée ;
-- une **source primaire/officielle** seule (ex. Banque Mondiale) n'est jamais pénalisée.
-
-> Inspiré du projet frère **au-crible**. L'objectif n'est pas de trancher plus, mais d'**arrêter d'affirmer avec assurance sur une base fragile**.
+Les réponses des capteurs encyclopédiques sont filtrées : un article dont le titre introduit son propre sujet est écarté, même s'il partage un mot avec l'affirmation.
 
 ---
 
-## 🎙️ La capture audio sous Firefox — à lire avant de tester
+## Corroboration : compter des voix, pas des liens
 
-Firefox **n'expose pas** d'API permettant de capter directement le son d'un onglet (`tabCapture` n'est pas implémenté, et `getDisplayMedia` ne renvoie aucune piste audio sous Firefox). InTruth capte donc un **périphérique d'entrée audio** via `getUserMedia` (traité par un **AudioWorklet**, hors du thread principal).
+Cinq « sources » peuvent n'être qu'une seule dépêche recopiée. InTruth calcule donc, **sans appel au modèle** :
 
-Au clic sur **« Activer la capture audio »**, Firefox affiche une fenêtre de permission micro **avec un menu déroulant de périphériques**. Le choix de ce périphérique détermine ce qui est transcrit :
+- les **voix indépendantes**, en regroupant les résultats par domaine enregistrable et par similarité lexicale ;
+- la **reprise circulaire**, signalée quand plusieurs résultats retombent dans une même voix ;
+- une **crédibilité par type de source**, fondée sur des signaux — données officielles et textes de loi en haut, presse générique en bas — jamais sur la réputation d'un média.
 
-| Objectif | Périphérique à choisir |
+Il en résulte une bande de robustesse (`INSUFFISANTE` · `FAIBLE` · `MODÉRÉE` · `SOLIDE`) qui **calibre le verdict sans jamais le gonfler** : corroboration insuffisante, le verdict devient `INVÉRIFIABLE` ; corroboration faible, la confiance est plafonnée. Une source primaire seule n'est jamais pénalisée.
+
+---
+
+## Prédictions et engagements
+
+Activable dans le tiroir de réglages du panneau. Ces énoncés sont **consignés, jamais jugés** — une prédiction n'est ni vraie ni fausse au moment où elle est prononcée.
+
+Quatre verrous : le prompt interdit de leur attacher un verdict, la séparation se fait avant toute normalisation, l'événement enregistré ne possède pas de champ verdict, et il ne passe jamais par la vérification sourcée.
+
+La forme est vérifiée : une prédiction doit porter une marque de futur, un engagement doit lier le locuteur. « Je voudrais continuer » n'est pas un engagement.
+
+---
+
+## Revue de session
+
+Bouton **⚖ Revue** dans l'en-tête du panneau. Un seul appel au modèle, sur la **liste condensée des événements** — jamais sur le transcript brut, qui dépasserait la fenêtre de contexte d'un débat de deux heures.
+
+Elle produit une synthèse, les constantes observées, les affirmations restées sans vérification, et les procédés rhétoriques relevés — limités à trois formes structurellement identifiables : faux dilemme, contre-accusation, attaque personnelle.
+
+**Un constat n'est retenu que s'il cite un extrait réellement prononcé et nomme le critère structurel qui le fonde.** Sinon il est écarté automatiquement. Une liste vide est une réponse valide et fréquente. Le prompt interdit par ailleurs d'inférer une intention, une sincérité ou une appartenance politique.
+
+---
+
+## La capture audio sous Firefox — à lire avant d'essayer
+
+Firefox n'expose aucune API permettant de capter le son d'un onglet : `tabCapture` n'y est pas implémenté et `getDisplayMedia` ne renvoie pas de piste audio. InTruth capte donc un **périphérique d'entrée**, traité par un AudioWorklet hors du thread principal.
+
+Au clic sur **« Activer la capture audio »**, Firefox affiche une fenêtre de permission avec un menu de périphériques. Ce choix détermine ce qui est transcrit :
+
+| Objectif | Périphérique |
 |---|---|
-| **Capter le son de l'onglet proprement** | un périphérique **« Monitor » / loopback** |
-| └ Linux (PulseAudio/PipeWire) | « Monitor of … » (déjà présent, rien à installer) |
-| └ Windows | « Stereo Mix » (à activer) ou un câble virtuel type VB-Audio Cable |
-| └ macOS | un périphérique loopback type BlackHole |
-| Test rapide / dépannage | votre micro réel — capte le son des haut-parleurs **+ le bruit ambiant** (qualité médiocre) |
+| Capter le son de l'onglet | un périphérique **« Monitor » / loopback** |
+| └ Linux (PulseAudio/PipeWire) | « Monitor of … », déjà présent |
+| └ Windows | « Stereo Mix », ou un câble virtuel (VB-Audio) |
+| └ macOS | un périphérique loopback (BlackHole) |
+| Test rapide | votre micro — capte aussi le bruit ambiant |
 
-> C'est une limite de Firefox, pas de l'extension. Le son de la vidéo continue de jouer normalement pendant la capture.
+C'est une limite de Firefox, pas de l'extension. Le son de la vidéo continue de jouer normalement.
 
 ---
 
-## 🤖 Modèles LLM pris en charge
+## Modèles pris en charge
 
-InTruth fonctionne avec **Anthropic** nativement, et avec **tout fournisseur exposant l'API `/chat/completions`** (standard OpenAI). Dans le popup, choisissez le fournisseur dans le menu **« Fournisseur (préréglage) »** : l'endpoint se remplit automatiquement. Vous renseignez ensuite le **modèle** et la **clé**.
+InTruth fonctionne avec **Anthropic** nativement et avec **tout fournisseur exposant `/chat/completions`** (standard OpenAI). Choisissez un préréglage, l'adresse se remplit seule ; il reste à indiquer le modèle et la clé.
 
-| Préréglage | Endpoint (URL de base) |
+| Préréglage | Adresse |
 |---|---|
-| OpenRouter (290+ modèles, 1 clé) | `https://openrouter.ai/api/v1` |
+| OpenRouter | `https://openrouter.ai/api/v1` |
 | OpenAI | `https://api.openai.com/v1` |
 | Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | Groq | `https://api.groq.com/openai/v1` |
@@ -133,149 +147,155 @@ InTruth fonctionne avec **Anthropic** nativement, et avec **tout fournisseur exp
 | Perplexity | `https://api.perplexity.ai` |
 | LM Studio (local) | `http://localhost:1234/v1` |
 | Ollama (local) | `http://localhost:11434/v1` |
-| Personnalisé | (saisie manuelle de l'URL) |
+| Personnalisé | saisie manuelle |
 
-**Modèles *reasoning*.** Si votre modèle « réfléchit » avant de répondre (o-series, DeepSeek-R1, etc.), cochez **« Modèle reasoning »**. InTruth omet alors la `temperature`, utilise `max_completion_tokens` avec un budget élargi, et retire le bloc `<think>…</think>` de la réponse avant l'analyse.
+**Modèles de raisonnement** : cochez la case dédiée. InTruth omet alors la température, élargit le budget de sortie et retire le bloc `<think>` avant analyse.
 
-**Modèles locaux.** Les préréglages LM Studio et Ollama pointent vers `localhost` (déjà autorisé). Activez le serveur (LM Studio → onglet *Developer/Server*, ou lancez Ollama), puis renseignez l'identifiant du modèle chargé. La clé peut rester vide en local.
+**Modèles locaux** : lancez le serveur (LM Studio, Ollama), indiquez le modèle chargé. La clé peut rester vide.
 
-**Autre fournisseur ?** Ajoutez son domaine dans `host_permissions` du `manifest.json` (sinon le `fetch` est bloqué par le CORS) et, si vous voulez, une `<option>` avec son `data-url` dans le popup.
+**Autre fournisseur** : ajoutez son domaine dans `host_permissions` du manifeste, sinon la requête est bloquée.
 
 ---
 
-## 🔎 Recherche web (moteur enfichable)
+## Recherche web
 
-La recherche web se choisit **dans le popup** (section « Recherche web »), pas dans le code. Trois moteurs, chacun en BYOK :
+Le moteur se choisit dans le popup, pas dans le code.
 
-| Moteur | Palier gratuit | Notes |
+| Moteur | Palier gratuit | Remarque |
 |---|---|---|
-| **Exa** (défaut) | ~20 000 requêtes / mois | Recherche neuronale/sémantique ; couverture plus étroite sur le français et le très récent |
-| **Tavily** | ~1 000 requêtes / mois | Orienté LLM ; bonne couverture générale, sans carte bancaire |
-| **Serper** | crédit de démarrage | Recherche Google ; payant à l'usage ensuite |
-| **Aucune** | — | Les capteurs structurés gratuits suffisent comme socle |
+| **Exa** (défaut) | ~20 000 requêtes/mois | Recherche sémantique ; couverture plus étroite en français |
+| **Tavily** | ~1 000 requêtes/mois | Bonne couverture générale, sans carte bancaire |
+| **Serper** | crédit de démarrage | Recherche Google, payante ensuite |
+| **Aucun** | — | Les douze capteurs sans clé suffisent comme socle |
 
-> Sur du contenu **francophone**, Exa peut renvoyer peu de résultats → basculez sur **Tavily** ou **Serper** pour une meilleure corroboration. Les paliers gratuits évoluent : vérifiez le vôtre sur le tableau de bord du fournisseur.
-
----
-
-## 🌍 Langue des verdicts (multilingue)
-
-InTruth peut rédiger les verdicts dans la langue de votre choix, indépendamment de la langue parlée dans la vidéo. Sélectionnez-la dans le popup (**« Langue des verdicts »**).
-
-- La **transcription reste en auto-détection** (Deepgram `multi`) : la langue parlée est reconnue automatiquement, on n'y touche pas.
-- Seule la **sortie** est traduite : les champs *affirmation* et *explication* sont rédigés dans la langue choisie ; les libellés de verdict (`VRAI`, `FAUX`…) restent standardisés.
-- La recherche **Serper** est localisée (`gl`/`hl`) selon la langue.
-
-Exemple : sur une vidéo **anglaise** avec « Français » sélectionné, la parole est transcrite en anglais, mais les affirmations et explications s'affichent **en français** — un véritable effet « traducteur » du fact-check.
-
-> Langues disponibles : français, anglais, espagnol, allemand, italien, portugais, néerlandais, hindi, japonais, chinois, arabe, coréen, russe, polonais, suédois, turc.
+Sur du contenu francophone, Tavily ou Serper corroborent souvent mieux qu'Exa. Les paliers évoluent : vérifiez le vôtre chez le fournisseur.
 
 ---
 
+## Langue des verdicts
 
-## 🔑 Clés API & mémorisation
+Sélectionnable dans le popup, parmi seize langues. La **transcription reste en détection automatique** : seule la sortie est traduite. Sur une vidéo anglaise avec « Français » choisi, la parole est transcrite en anglais mais les affirmations et explications s'affichent en français.
 
-- **Clé LLM** — Anthropic, ou celle de votre fournisseur compatible OpenAI (facultative pour un modèle purement local).
-- **Clé Deepgram** — pour la transcription audio.
-- **Clé de recherche web** — Exa / Tavily / Serper selon le moteur choisi (facultative : sans elle, les capteurs gratuits assurent le socle).
-- **Clé Google Fact Check** — facultative ; renforce les verdicts avec les fact-checks déjà publiés.
-
-**Mémorisation.** La case **« Se souvenir de mes clés sur ce navigateur »** (cochée par défaut) contrôle le stockage :
-
-- **cochée** → clés dans `storage.local` (persistant) ;
-- **décochée** → clés en `storage.session` (session courante uniquement, jamais écrites sur le disque).
-
-> ⚠️ **Persistance et module temporaire.** Pour un module chargé via `about:debugging`, Firefox **efface le stockage local au redémarrage du navigateur**. Deux solutions : (1) en dev, passez `extensions.webextensions.keepStorageOnUninstall` **et** `keepUuidOnUninstall` à `true` dans `about:config` ; (2) en usage réel, installez une version empaquetée/signée.
+Les libellés de verdict restent normalisés, et les citations ne sont jamais traduites — traduire un extrait le rendrait introuvable dans le transcript.
 
 ---
 
-## 🚀 Utilisation
+## Clés et confidentialité
 
-1. Ouvrez une vidéo / un live / un débat (ex. YouTube).
-2. Cliquez sur l'icône InTruth : choisissez le fournisseur LLM, le moteur de recherche, renseignez le modèle et les clés (LLM + Deepgram).
-3. Cliquez sur **Start Fact-Checking** — le panneau apparaît sur la page.
-4. Dans le panneau, cliquez **« Activer la capture audio »** et **sélectionnez votre périphérique Monitor/loopback** dans la fenêtre Firefox.
-5. Transcriptions, affirmations et verdicts s'affichent en direct. Exportez le rapport en fin de session.
+Quatre clés, dont deux seulement sont nécessaires :
 
----
+- **Modèle** — Anthropic ou fournisseur compatible OpenAI (inutile pour un modèle local).
+- **Deepgram** — transcription.
+- **Recherche web** — facultative ; sans elle, les capteurs sans clé assurent le socle.
+- **Google Fact Check** — facultative.
 
-## 🎯 Qu'est-ce qu'une affirmation « vérifiable » ?
+La case **« Se souvenir de mes clés »** choisit entre un stockage persistant et une conservation limitée à la session en cours.
 
-**Vérifié :** déclarations factuelles précises, statistiques et données chiffrées, événements historiques, bilans et actions gouvernementaux, affirmations scientifiques ou médicales, résultats sportifs, faits documentés.
+Vos identifiants ne sont utilisés que pour joindre les services **que vous configurez**. Les fragments de transcription partent vers Deepgram, votre modèle et le moteur de recherche choisi. Les capteurs de données ouvertes sont des API publiques. L'auteur de l'extension n'a accès à rien.
 
-*Exemples :* « L'inflation a culminé à 9,1 % en 2022. » · « Ce projet de loi a été voté au Sénat en 2021. » · « Le Paraguay a éliminé l'Allemagne. »
-
-**Non vérifié :** opinions, prédictions et promesses, questions rhétoriques, jugements de valeur, descriptions subjectives.
-
-*Exemples :* « Cette politique va détruire l'économie. » · « J'ai le meilleur programme. » · « Si mon adversaire gagne, ce sera un désastre. »
+> **Persistance et module temporaire.** Chargée via `about:debugging`, l'extension voit son stockage effacé au redémarrage de Firefox. En développement, passez `extensions.webextensions.keepStorageOnUninstall` et `keepUuidOnUninstall` à `true` dans `about:config`.
 
 ---
 
-## 🖥️ Plateformes prises en charge
+## Utilisation
 
-Le panneau s'injecte sur : **YouTube**, **Twitch**, **X / Twitter**, **Facebook** (`www` et `web`), **Rumble**, **Kick**, **Instagram**, **TikTok**, **Bluesky**, **Odysee** et **Dailymotion**.
+1. Ouvrez une vidéo, un direct ou un débat.
+2. Icône InTruth : choisissez le modèle, le moteur de recherche, la langue ; renseignez les clés.
+3. **Start Fact-Checking** — le panneau apparaît.
+4. Dans le panneau, **« Activer la capture audio »**, puis sélectionnez votre périphérique Monitor.
+5. Transcription, affirmations et verdicts s'affichent en direct.
+6. **⚖ Revue** pour la synthèse, **↓ Export** pour le rapport.
 
-> Pour en ajouter une, complétez `content_scripts.matches` dans `manifest.json`.
+Le tiroir **⚙** règle la taille du panneau et du texte, le filtre d'affichage (tout / problèmes / confirmés), la détection des prédictions et la résolution des pronoms.
 
----
-
-## 🔒 Permissions Firefox
-
-- `activeTab` — interagir avec l'onglet actif au lancement.
-- `scripting` — injecter le panneau de verdicts.
-- `storage` — sauvegarder vos clés et préférences localement.
-- `host_permissions` — joindre les API utilisées : Anthropic, les fournisseurs compatibles OpenAI pré-autorisés (OpenRouter, Gemini, Groq, Mistral, DeepSeek, xAI, Together, Fireworks, Perplexity), OpenAI, Deepgram, les moteurs de recherche (Exa, Tavily, Serper), les capteurs de données (Wikipédia, Wikidata, GDELT, OpenAlex, Crossref, Europe PMC, Banque Mondiale, Nominatim, ESPN, Google Fact Check), et `localhost`/`127.0.0.1` (modèles locaux).
-- **Micro** — l'autorisation d'accès à l'entrée audio est demandée *à l'exécution*, lors du clic sur « Activer la capture audio ».
-
-*(Firefox n'a besoin ni de `offscreen` ni de `tabCapture` : la capture passe par `getUserMedia` et le WebSocket tourne dans le background.)*
+Si le panneau disparaît en cours de session, le bouton **« Rouvrir le panneau »** du popup le remonte avec tout son historique.
 
 ---
 
-## 🔐 Confidentialité
+## Qu'est-ce qu'une affirmation vérifiable ?
 
-- Vous fournissez vos propres identifiants d'API ; l'auteur de l'extension n'y a aucun accès.
-- Les fragments de transcription sont envoyés directement aux services que **vous** configurez (Deepgram pour la transcription, votre LLM pour l'analyse, le moteur de recherche choisi).
-- Les capteurs de données ouvertes interrogés sont des **API publiques** (Wikipédia, Banque Mondiale, ESPN…).
-- Les clés et préférences sont stockées **localement** dans votre navigateur (ou en mémoire de session si la mémorisation est désactivée).
+**Vérifié** : déclarations factuelles précises, statistiques, événements historiques, bilans gouvernementaux, textes de loi, affirmations scientifiques ou médicales, résultats sportifs.
 
----
+*« L'inflation a culminé à 9,1 % en 2022. » · « Ce projet de loi a été voté au Sénat en 2021. » · « L'article L. 1132-1 interdit la discrimination. »*
 
-## ⚠️ Limites et avertissements
+**Non vérifié** : opinions, jugements de valeur, questions rhétoriques, descriptions subjectives. Les prédictions et engagements sont relevés à part, sans verdict.
 
-Le fact-checking automatique est imparfait. Les verdicts peuvent être erronés, incomplets ou basés sur des informations datées. En cas de doute, faites vos propres recherches et consultez les sources primaires.
+*« Cette politique va détruire l'économie. » · « J'ai le meilleur programme. »*
 
-- Les **modèles *reasoning*** sont plus lents : une carte « en attente » expire au bout de 90 s dans le panneau — un modèle local trop lent peut dépasser ce délai.
-- La **qualité de la capture audio** dépend du périphérique choisi (voir la section dédiée).
-- La **couverture sportive** se limite aux grandes ligues (ESPN, endpoints non officiels susceptibles de changer).
-- **Exa** couvre moins bien le français et le très récent ; en corroboration, cela peut ramener certains verdicts à `INVÉRIFIABLE` — préférez Tavily/Serper sur du contenu francophone.
-
-**Cette extension est un outil d'assistance, pas une autorité.**
+Les segments mal transcrits — phrases coupées, questions, suites de chiffres sans énoncé — sont écartés avant toute vérification, pour ne pas dépenser un appel sur du bruit.
 
 ---
 
-## 💻 Prérequis & installation (mode développeur)
+## Plateformes
 
-- Mozilla Firefox **140+** (desktop) ou **142+** (Android).
-- Une clé Deepgram, et une clé LLM (Anthropic ou fournisseur compatible OpenAI) — sauf modèle 100 % local. Une clé de recherche web (Exa/Tavily/Serper) est recommandée mais facultative.
+YouTube · Twitch · X / Twitter · Facebook · Rumble · Kick · Instagram · TikTok · Bluesky · Odysee · Dailymotion
+
+Pour en ajouter une, complétez `content_scripts.matches` dans le manifeste.
+
+---
+
+## Permissions
+
+- `activeTab` — interagir avec l'onglet au lancement
+- `scripting` — injecter le panneau
+- `storage` — clés, réglages et mémoire de session
+- `host_permissions` — joindre les services configurés et les capteurs de données ouvertes
+- **Micro** — demandé à l'exécution, au clic sur « Activer la capture audio »
+
+Ni `tabCapture` ni `offscreen` : la capture passe par `getUserMedia` et le WebSocket vit dans le background.
+
+---
+
+## Limites
+
+Le fact-checking automatique est imparfait. En cas de doute, consultez les sources primaires — les liens sont là pour ça.
+
+- La **qualité de la transcription** conditionne tout le reste. Un mot mal reconnu peut transformer une affirmation vraie en affirmation fausse. C'est la limite la plus sérieuse, et elle est en amont de la vérification.
+- Le **filtrage des sources est lexical** : il écarte l'essentiel du hors-sujet, pas la totalité.
+- L'**attribution des locuteurs** échoue parfois — l'extension affiche alors « Inconnu » plutôt que d'attribuer au hasard.
+- La **couverture sportive** se limite aux grandes ligues.
+- **JusticeLibre** est une infrastructure associative, pas un service public garanti.
+- Les **modèles de raisonnement** sont plus lents : une carte en attente expire au bout de 90 secondes.
+
+**Cet outil assiste le jugement, il ne le remplace pas.**
+
+---
+
+## Installation (mode développeur)
+
+Firefox 140+ (desktop) ou 142+ (Android). Une clé Deepgram et une clé de modèle, sauf modèle entièrement local.
 
 1. Clonez ce dépôt.
-2. Dans Firefox, ouvrez `about:debugging#/runtime/this-firefox`.
-3. **Charger un module temporaire…** → sélectionnez le `manifest.json` du dossier `realtime-factcheck/`.
-4. Ouvrez une vidéo, cliquez sur l'icône de l'extension, renseignez vos clés, puis **Start**.
+2. Ouvrez `about:debugging#/runtime/this-firefox`.
+3. **Charger un module temporaire…** → sélectionnez `realtime-factcheck/manifest.json`.
+4. Renseignez vos clés dans le popup, puis **Start**.
 
-> Après chaque modification des fichiers, cliquez sur **Recharger** dans `about:debugging`.
+Après modification des fichiers, cliquez **Recharger** dans `about:debugging`.
 
 ---
 
-## 🤝 Contribution
+## Développement
 
-Remarques, idées et retours sur des cas particuliers bienvenus — ouvrez une *Issue* ou une *Pull Request*.
+Un filet de tests couvre la logique de décision — routage, corroboration, filtrage des sources, attribution, analyse du discours, revue.
 
-## 🙏 Crédits
+```bash
+npm test          # 353 tests, aucune dépendance
+npm run test:spec # détail test par test
+```
 
-- Projet original **InTruth** par [Risha Panigrahi](https://github.com/rpanigrahi222/intruth-factcheck).
-- Fork Firefox, galaxie de capteurs, recherche enfichable et corroboration : ce dépôt.
+Aucun `npm install` : le lanceur est intégré à Node (20+). L'extension reste en scripts classiques, sans étape de compilation.
 
-## 📄 Licence
+Les tests chargent le vrai code de l'extension dans un bac à sable où le réseau est coupé : seule la logique déterministe est vérifiée. Renommer une fonction testée fait échouer le chargement avec un message explicite — c'est voulu.
 
-Licence MIT (voir le fichier `LICENSE`).
+---
+
+## Crédits
+
+Projet original **InTruth** par [Risha Panigrahi](https://github.com/rpanigrahi222/intruth-factcheck).
+Portage Firefox, capteurs, corroboration, mémoire de session et analyse du discours : ce dépôt.
+
+Données ouvertes : DILA, Office des publications de l'UE, Federal Register, Banque Mondiale, Crossref, OpenAlex, Europe PMC, Wikimedia, GDELT, OpenStreetMap, et [JusticeLibre](https://justicelibre.org).
+
+## Licence
+
+MIT — voir le fichier `LICENSE`.
