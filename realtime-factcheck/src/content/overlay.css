@@ -727,3 +727,86 @@
 
 .rtfc-discourse--prediction .rtfc-badge--discourse { color: #a78bfa; border-color: rgba(167,139,250,0.4); }
 .rtfc-discourse--commitment .rtfc-badge--discourse { color: #38bdf8; border-color: rgba(56,189,248,0.4); }
+
+/* ── Bandeau d'information (ton neutre, distinct des erreurs) ── */
+
+.rtfc-notice {
+  padding: 7px 14px;
+  background: rgba(59,130,246,0.10);
+  border-bottom: 0.5px solid rgba(59,130,246,0.3);
+  font-size: 10.5px;
+  color: #93b4e8;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+
+/* ── Revue de session ── */
+
+#rtfc-review {
+  background: none;
+  border: 0.5px solid rgba(255,255,255,0.15);
+  border-radius: 4px;
+  color: #888;
+  font-size: 10px;
+  font-family: 'Inter', sans-serif;
+  font-weight: 500;
+  padding: 3px 7px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  letter-spacing: 0.02em;
+}
+
+#rtfc-review:hover:not(:disabled) {
+  color: #e8e8e8;
+  border-color: rgba(255,255,255,0.35);
+}
+
+#rtfc-review:disabled { opacity: 0.5; cursor: progress; }
+
+#rtfc-review-section {
+  border-bottom: 0.5px solid rgba(255,255,255,0.07);
+  background: rgba(255,255,255,0.02);
+  flex-shrink: 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.rtfc-review-body { padding: 4px 14px 10px; }
+
+.rtfc-review-summary {
+  font-size: 11px;
+  color: #bbb;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.rtfc-review-subtitle {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #666;
+  margin: 8px 0 4px;
+}
+
+.rtfc-review-list {
+  margin: 0 0 4px;
+  padding-left: 16px;
+  font-size: 10.5px;
+  color: #999;
+  line-height: 1.5;
+}
+
+.rtfc-review-finding {
+  border-left: 1.5px solid rgba(148,163,184,0.4);
+  padding: 4px 0 4px 8px;
+  margin-bottom: 7px;
+}
+
+.rtfc-review-empty {
+  font-size: 10px;
+  color: #666;
+  font-style: italic;
+  line-height: 1.45;
+  margin-top: 4px;
+}

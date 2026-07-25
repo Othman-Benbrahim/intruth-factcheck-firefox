@@ -125,6 +125,51 @@ function requestSession() {
   });
 }
 
+function buildReviewSection(review) {
+  if (!review) return [];
+  const LABELS = {
+    FALSE_DILEMMA: 'Faux dilemme',
+    WHATABOUTISM:  'Contre-accusation',
+    AD_HOMINEM:    'Attaque personnelle',
+  };
+  const lines = [];
+  lines.push('## Revue de session');
+  lines.push('');
+  if (review.summary) { lines.push(mdInline(review.summary)); lines.push(''); }
+
+  if (review.patterns && review.patterns.length) {
+    lines.push('**Constantes observées**');
+    lines.push('');
+    review.patterns.forEach(p => lines.push('- ' + mdInline(p)));
+    lines.push('');
+  }
+
+  lines.push('**Procédés rhétoriques relevés**');
+  lines.push('');
+  if (review.findings && review.findings.length) {
+    review.findings.forEach(f => {
+      lines.push('- **' + (LABELS[f.type] || f.type) + '**' + (f.speaker ? ' · ' + mdInline(f.speaker) : ''));
+      lines.push('  > ' + mdInline(f.quote));
+      lines.push('  ' + mdInline(f.criterion));
+      lines.push('');
+    });
+  } else {
+    lines.push('_Aucun procédé retenu. Les constats non étayés par une citation exacte sont écartés automatiquement._');
+    lines.push('');
+  }
+
+  if (review.unresolved && review.unresolved.length) {
+    lines.push('**Affirmations restées sans vérification**');
+    lines.push('');
+    review.unresolved.forEach(u => lines.push('- ' + mdInline(u)));
+    lines.push('');
+  }
+
+  lines.push('---');
+  lines.push('');
+  return lines;
+}
+
 function buildDiscourseSection(items) {
   if (!items || !items.length) return [];
   const label = (t) => (t === 'PREDICTION' ? 'Prédiction' : 'Engagement');
@@ -188,6 +233,10 @@ function buildMarkdown(entries, meta) {
     if (!groups[spk]) { groups[spk] = []; order.push(spk); }
     groups[spk].push({ entry, i });
   });
+
+  if (meta && meta.review) {
+    lines.push(...buildReviewSection(meta.review));
+  }
 
   if (meta && meta.discourse && meta.discourse.length) {
     lines.push(...buildDiscourseSection(meta.discourse));
@@ -257,6 +306,7 @@ async function exportPDF() {
     title:      (res && res.session && res.session.source && res.session.source.title) || document.title,
     durationMs: (res && res.summary && res.summary.durationMs) || 0,
     discourse:  discourseFromSession(res && res.session),
+    review:     (res && res.session && res.session.review) || null,
   };
 
   const md   = buildMarkdown(rows, meta);

@@ -306,6 +306,18 @@ function clearRuntimeErrorStorage() {
   chrome.storage.local.remove(RUNTIME_ERROR_KEYS);
 }
 
+// Information neutre (pas une erreur) affichée en tête du panneau.
+function showNotice(message) {
+  if (!panel) return;
+  panel.querySelector('.rtfc-notice')?.remove();
+  const notice = document.createElement('div');
+  notice.className = 'rtfc-notice';
+  notice.setAttribute('role', 'status');
+  notice.textContent = message;
+  panel.querySelector('#rtfc-header')?.insertAdjacentElement('afterend', notice);
+  setTimeout(() => notice.remove(), 10000);
+}
+
 function showError(message, opts) {
   opts = opts || {};
   const normalized = String(message || 'Erreur pipeline inconnue.').trim();
@@ -482,6 +494,14 @@ function createPanel() {
   settingsBtn.textContent = '⚙';
   headerActions.appendChild(settingsBtn);
 
+  const reviewBtn = document.createElement('button');
+  reviewBtn.id = 'rtfc-review';
+  reviewBtn.type = 'button';
+  reviewBtn.title = 'Revue de session';
+  reviewBtn.setAttribute('aria-label', 'Lancer la revue de session');
+  reviewBtn.textContent = '⚖ Revue';
+  headerActions.appendChild(reviewBtn);
+
   const exportBtn = document.createElement('button');
   exportBtn.id = 'rtfc-export';
   exportBtn.type = 'button';
@@ -652,6 +672,7 @@ function createPanel() {
   });
 
   panel.querySelector('#rtfc-export').addEventListener('click', () => exportPDF());
+  panel.querySelector('#rtfc-review').addEventListener('click', () => runReview());
 
   // ── Réglages : ouverture du tiroir ──
   const settingsBtnEl = panel.querySelector('#rtfc-settings');
@@ -874,6 +895,190 @@ function buildDiscourseCard(item) {
   }
 
   return card;
+}
+
+// Reconstruit le contenu du panneau à partir de la mémoire de session.
+// Les événements sont rejoués du plus ancien au plus récent : chaque carte
+// étant ajoutée en tête, l'ordre d'affichage reste chronologique inversé.
+// ── Revue de session ────────────────────────────────────────────────────────
+
+let reviewRunning = false;
+
+function runReview() {
+  if (reviewRunning) return;
+  const btn = panel?.querySelector('#rtfc-review');
+  reviewRunning = true;
+  if (btn) { btn.disabled = true; btn.textContent = '⚖ Analyse…'; }
+
+  chrome.runtime.sendMessage({ type: 'REVIEW_SESSION' }, (res) => {
+    reviewRunning = false;
+    if (btn) { btn.disabled = false; btn.textContent = '⚖ Revue'; }
+
+    if (chrome.runtime.lastError || !res) {
+      showNotice('Revue indisponible : le service d’analyse n’a pas répondu.');
+      return;
+    }
+    if (!res.ok) {
+      const raisons = {
+        'not-enough-events': 'Pas encore assez d’éléments pour une revue utile.',
+        'no-session':        'Aucune session à analyser.',
+        'empty-digest':      'Aucun élément exploitable dans cette session.',
+        'parse-failed':      'Réponse du modèle inexploitable — réessayez.',
+      };
+      showNotice(raisons[res.reason] || ('Revue impossible : ' + (res.message || res.reason)));
+      return;
+    }
+    renderReview(res.review);
+  });
+}
+
+function renderReview(review) {
+  if (!panel || !review) return;
+  panel.querySelector('#rtfc-review-section')?.remove();
+
+  const section = document.createElement('div');
+  section.id = 'rtfc-review-section';
+  section.setAttribute('role', 'region');
+  section.setAttribute('aria-label', 'Revue de session');
+
+  const header = document.createElement('div');
+  header.className = 'rtfc-section-header';
+  const label = document.createElement('span');
+  label.className = 'rtfc-section-label';
+  label.textContent = 'Revue de session';
+  header.appendChild(label);
+  const close = document.createElement('button');
+  close.className = 'rtfc-toggle-btn';
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Fermer la revue');
+  close.textContent = '✕';
+  close.addEventListener('click', () => section.remove());
+  header.appendChild(close);
+  section.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'rtfc-review-body';
+
+  if (review.summary) {
+    const p = document.createElement('p');
+    p.className = 'rtfc-review-summary';
+    p.textContent = review.summary;
+    body.appendChild(p);
+  }
+
+  const addList = (title, items) => {
+    if (!items || !items.length) return;
+    const h = document.createElement('div');
+    h.className = 'rtfc-review-subtitle';
+    h.textContent = title;
+    body.appendChild(h);
+    const ul = document.createElement('ul');
+    ul.className = 'rtfc-review-list';
+    for (const it of items) {
+      const li = document.createElement('li');
+      li.textContent = it;
+      ul.appendChild(li);
+    }
+    body.appendChild(ul);
+  };
+
+  addList('Constantes observées', review.patterns);
+
+  if (review.findings && review.findings.length) {
+    const h = document.createElement('div');
+    h.className = 'rtfc-review-subtitle';
+    h.textContent = 'Procédés rhétoriques relevés';
+    body.appendChild(h);
+
+    for (const f of review.findings) {
+      const item = document.createElement('div');
+      item.className = 'rtfc-review-finding';
+
+      const badge = document.createElement('span');
+      badge.className = 'rtfc-badge rtfc-badge--discourse';
+      badge.textContent = FALLACY_LABELS[f.type] || f.type;
+      item.appendChild(badge);
+
+      if (f.speaker) {
+        const who = document.createElement('span');
+        who.className = 'rtfc-discourse-note';
+        who.textContent = f.speaker;
+        item.appendChild(who);
+      }
+
+      const quote = document.createElement('p');
+      quote.className = 'rtfc-claim';
+      quote.textContent = '« ' + f.quote + ' »';
+      item.appendChild(quote);
+
+      const why = document.createElement('p');
+      why.className = 'rtfc-explanation';
+      why.textContent = f.criterion;
+      item.appendChild(why);
+
+      body.appendChild(item);
+    }
+  } else {
+    const none = document.createElement('p');
+    none.className = 'rtfc-review-empty';
+    none.textContent = 'Aucun procédé rhétorique retenu — les constats non étayés par une citation exacte sont écartés.';
+    body.appendChild(none);
+  }
+
+  addList('Affirmations restées sans vérification', review.unresolved);
+
+  if (review.truncated) {
+    const note = document.createElement('p');
+    note.className = 'rtfc-review-empty';
+    note.textContent = 'Session longue : seuls les éléments les plus récents ont été analysés.';
+    body.appendChild(note);
+  }
+
+  section.appendChild(body);
+  panel.querySelector('#rtfc-header')?.insertAdjacentElement('afterend', section);
+}
+
+const FALLACY_LABELS = {
+  FALSE_DILEMMA: 'FAUX DILEMME',
+  WHATABOUTISM:  'CONTRE-ACCUSATION',
+  AD_HOMINEM:    'ATTAQUE PERSONNELLE',
+};
+
+function restoreFromSession(session) {
+  if (!session || !Array.isArray(session.events) || !verdictListEl) return;
+
+  const events = session.events.slice().sort((a, b) => (a.offsetMs || 0) - (b.offsetMs || 0));
+  let restored = 0;
+
+  for (const e of events) {
+    if (e.type === 'CLAIM') {
+      addClaimBullet(e.text);
+      addVerdict({
+        claim:       e.text,
+        verdict:     e.verdict,
+        confidence:  e.confidence,
+        explanation: e.explanation,
+        sources:     e.sources || [],
+        pending:     e.status === 'pending',
+        lexical:     e.lexical || null,
+        corroboration: e.corroboration || null,
+        speaker_confidence: e.speakerConfidence || null,
+        speaker:     e.speaker || null,
+        dominantSpeakerId: e.speakerId ?? null,
+        _timestamp:  e.mediaTimestamp || '',
+      });
+      restored++;
+    } else if (e.type === 'PREDICTION' || e.type === 'COMMITMENT') {
+      addDiscourseEvents([{ kind: e.type, statement: e.text, speaker: e.speaker, horizon: e.horizon }]);
+      restored++;
+    }
+  }
+
+  if (restored) {
+    showNotice(restored + ' élément' + (restored > 1 ? 's' : '') +
+      ' restauré' + (restored > 1 ? 's' : '') +
+      ' — relancez la capture audio pour poursuivre.');
+  }
 }
 
 function addDiscourseEvents(items) {
@@ -1304,6 +1509,16 @@ chrome.runtime.onMessage.addListener((msg) => {
       clearRuntimeErrorStorage();
       break;
 
+    case 'RESTORE_SESSION':
+      // La page a été rechargée en cours de session : on remonte le panneau et
+      // on réaffiche l'historique conservé par le background.
+      clearRuntimeErrorStorage();
+      createPanel();
+      speakers = parseSpeakersFromTitle(document.title || '');
+      renderSpeakerEditor();
+      restoreFromSession(msg.session);
+      break;
+
     case 'NEW_DISCOURSE':
       addDiscourseEvents(msg.items);
       break;
@@ -1326,3 +1541,11 @@ chrome.runtime.onMessage.addListener((msg) => {
       break;
   }
 });
+
+// ── Reprise après rechargement de page ──────────────────────────────────────
+// Le content script est détruit à chaque navigation. Il s'annonce donc au
+// chargement : si une session est en cours, le background lui renvoie
+// l'historique et le panneau se remonte.
+try {
+  chrome.runtime.sendMessage({ type: 'CONTENT_READY' });
+} catch (_) { /* background injoignable : rien à restaurer */ }
