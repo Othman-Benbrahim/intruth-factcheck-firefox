@@ -101,6 +101,19 @@ function entriesFromSession(session) {
     }));
 }
 
+function discourseFromSession(session) {
+  if (!session || !Array.isArray(session.events)) return [];
+  return session.events
+    .filter(e => e.type === 'PREDICTION' || e.type === 'COMMITMENT')
+    .map(e => ({
+      type:    e.type,
+      text:    e.text,
+      speaker: e.speaker || (e.speakerId && session.speakers ? session.speakers[e.speakerId] : null),
+      horizon: e.horizon || null,
+      secondsElapsed: Math.round((e.offsetMs || 0) / 1000),
+    }));
+}
+
 function requestSession() {
   return new Promise((resolve) => {
     try {
@@ -110,6 +123,29 @@ function requestSession() {
       });
     } catch (_) { resolve(null); }
   });
+}
+
+function buildDiscourseSection(items) {
+  if (!items || !items.length) return [];
+  const label = (t) => (t === 'PREDICTION' ? 'Prédiction' : 'Engagement');
+  const lines = [];
+  lines.push('## Prédictions et engagements');
+  lines.push('');
+  lines.push('_Consignés sans verdict : ces énoncés ne sont ni vrais ni faux au moment où ils sont prononcés. Ils sont relevés pour pouvoir être réexaminés plus tard._');
+  lines.push('');
+  items.forEach((it) => {
+    const head = '**' + label(it.type) + '**' +
+      (it.speaker ? ' · ' + mdInline(it.speaker) : '') +
+      ' · `' + mdTimestamp(it.secondsElapsed) + '`' +
+      (it.horizon ? ' · échéance : ' + mdInline(it.horizon) : '');
+    lines.push(head);
+    lines.push('');
+    lines.push('> ' + mdInline(it.text));
+    lines.push('');
+  });
+  lines.push('---');
+  lines.push('');
+  return lines;
 }
 
 function buildMarkdown(entries, meta) {
@@ -152,6 +188,10 @@ function buildMarkdown(entries, meta) {
     if (!groups[spk]) { groups[spk] = []; order.push(spk); }
     groups[spk].push({ entry, i });
   });
+
+  if (meta && meta.discourse && meta.discourse.length) {
+    lines.push(...buildDiscourseSection(meta.discourse));
+  }
 
   lines.push('## Affirmations');
   lines.push('');
@@ -216,6 +256,7 @@ async function exportPDF() {
   const meta = {
     title:      (res && res.session && res.session.source && res.session.source.title) || document.title,
     durationMs: (res && res.summary && res.summary.durationMs) || 0,
+    discourse:  discourseFromSession(res && res.session),
   };
 
   const md   = buildMarkdown(rows, meta);

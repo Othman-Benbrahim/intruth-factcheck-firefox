@@ -356,6 +356,7 @@ const DEFAULT_SETTINGS = {
   fontSize:        'normal',  // small | normal | large
   verdictFilter:   'all',     // all | flagged | accurate
   resolvePronouns: false,     // résolution des pronoms (désactivée par défaut)
+  discourseEnabled: false,    // détection des types de discours (désactivée par défaut)
 };
 let settings = { ...DEFAULT_SETTINGS };
 
@@ -398,10 +399,28 @@ function shouldShowVerdict(verdict) {
   return true; // 'all'
 }
 
+// Les énoncés de discours ne sont pas des verdicts : les filtres de verdict ne
+// s'y appliquent pas. Ils s'effacent quand l'utilisateur restreint l'affichage.
+function shouldShowDiscourse() {
+  return settings.verdictFilter === 'all';
+}
+
+const DISCOURSE_LABELS = {
+  PREDICTION: 'PRÉDICTION',
+  COMMITMENT: 'ENGAGEMENT',
+};
+
+function discourseLabel(type) {
+  return DISCOURSE_LABELS[type] || 'ÉNONCÉ';
+}
+
 function applyFilterToCard(card, result) {
   if (!card) return;
   // les cartes en attente restent visibles : leur verdict n'est pas définitif
-  const show = (result && result.pending) ? true : shouldShowVerdict(result && result.verdict);
+  const isDiscourse = Boolean(result && result.__discourse);
+  const show = isDiscourse
+    ? shouldShowDiscourse()
+    : ((result && result.pending) ? true : shouldShowVerdict(result && result.verdict));
   card.style.display = show ? '' : 'none';
 }
 
@@ -520,6 +539,10 @@ function createPanel() {
     { value: 'all',      label: 'Tout' },
     { value: 'flagged',  label: 'Problèmes', title: 'Uniquement FAUX et TROMPEUR' },
     { value: 'accurate', label: 'Confirmés', title: 'Uniquement VRAI et SUBSTANTIELLEMENT VRAI' },
+  ]));
+  drawer.appendChild(buildSettingRow('Prédictions et engagements', 'discourseEnabled', [
+    { value: 'false', label: 'Off', title: 'Seules les affirmations factuelles sont relevées' },
+    { value: 'true',  label: 'On',  title: 'Relève aussi les prédictions et les engagements — consignés sans verdict' },
   ]));
   drawer.appendChild(buildSettingRow('Résolution des pronoms', 'resolvePronouns', [
     { value: 'false', label: 'Off', title: 'Analyse le transcript tel quel' },
@@ -805,6 +828,63 @@ function computeDissonance(result) {
   if (commit === 'PRUDENT'  && refuted)   return { level: 'info',  icon: 'ℹ️', label: 'Imprécision prudente' };
   if (commit === 'ASSERTIF' && confirmed) return { level: 'ok',    icon: '✓',  label: 'Affirmé et confirmé' };
   return null; // les autres croisements (prudent + exact, invérifiable…) ne sont pas signalés
+}
+
+function buildDiscourseCard(item) {
+  const card = document.createElement('div');
+  card.className = 'rtfc-verdict rtfc-discourse rtfc-discourse--' + String(item.kind || '').toLowerCase();
+  card.setAttribute('role', 'article');
+  card.setAttribute('aria-label', discourseLabel(item.kind) + ' : ' + (item.statement || ''));
+  card._resultData = { __discourse: true, kind: item.kind };
+
+  const header = document.createElement('div');
+  header.className = 'rtfc-verdict-header';
+
+  const badge = document.createElement('span');
+  badge.className = 'rtfc-badge rtfc-badge--discourse';
+  badge.textContent = discourseLabel(item.kind);
+  header.appendChild(badge);
+
+  const note = document.createElement('span');
+  note.className = 'rtfc-discourse-note';
+  note.textContent = 'non vérifiable à ce stade';
+  header.appendChild(note);
+
+  if (item.horizon) {
+    const horizon = document.createElement('span');
+    horizon.className = 'rtfc-timestamp';
+    horizon.textContent = item.horizon;
+    header.appendChild(horizon);
+  }
+  card.appendChild(header);
+
+  const text = document.createElement('p');
+  text.className = 'rtfc-claim';
+  text.textContent = '« ' + (item.statement || '') + ' »';
+  card.appendChild(text);
+
+  const speakerName = item.speaker && !/^Speaker\s*\d+$/i.test(item.speaker)
+    ? normalizeSpeakerName(item.speaker) : null;
+  if (speakerName) {
+    const tag = document.createElement('div');
+    tag.className = 'rtfc-speaker-tag';
+    tag.style.background = getSpeakerColor(speakerName);
+    tag.textContent = speakerName;
+    card.insertBefore(tag, card.firstChild);
+  }
+
+  return card;
+}
+
+function addDiscourseEvents(items) {
+  if (!verdictListEl || !Array.isArray(items)) return;
+  verdictListEl.querySelector('.rtfc-empty')?.remove();
+  for (const item of items) {
+    if (!item || !item.statement) continue;
+    const card = buildDiscourseCard(item);
+    applyFilterToCard(card, card._resultData);
+    verdictListEl.prepend(card);
+  }
 }
 
 function buildCard(result) {
@@ -1222,6 +1302,10 @@ chrome.runtime.onMessage.addListener((msg) => {
     case 'PIPELINE_OK':
     case 'PIPELINE_RECOVERED':
       clearRuntimeErrorStorage();
+      break;
+
+    case 'NEW_DISCOURSE':
+      addDiscourseEvents(msg.items);
       break;
 
     case 'NEW_VERDICT':

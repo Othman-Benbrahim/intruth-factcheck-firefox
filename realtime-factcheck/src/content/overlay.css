@@ -696,3 +696,34 @@
   border-color: rgba(59,130,246,0.6);
   outline: none;
 }
+
+/* ── Énoncés de discours (prédictions, engagements) ── */
+/* Volontairement sans code couleur de vérité : ces énoncés sont consignés,
+   pas jugés. Bordure neutre en pointillés pour les distinguer des verdicts. */
+
+.rtfc-discourse {
+  border-style: dashed;
+  border-color: rgba(255,255,255,0.16);
+  background: rgba(255,255,255,0.02);
+}
+
+.rtfc-badge--discourse {
+  color: #94a3b8;
+  border: 0.5px solid rgba(148,163,184,0.4);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.rtfc-discourse-note {
+  font-size: 9px;
+  color: #555;
+  font-style: italic;
+  margin-left: 6px;
+}
+
+.rtfc-discourse .rtfc-claim {
+  color: #a8b3c4;
+}
+
+.rtfc-discourse--prediction .rtfc-badge--discourse { color: #a78bfa; border-color: rgba(167,139,250,0.4); }
+.rtfc-discourse--commitment .rtfc-badge--discourse { color: #38bdf8; border-color: rgba(56,189,248,0.4); }
