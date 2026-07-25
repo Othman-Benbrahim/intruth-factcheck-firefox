@@ -248,6 +248,73 @@ function splitDiscourseItems(rawResults) {
   return { claims, discourse };
 }
 
+// ── Recevabilité d'un énoncé de discours ────────────────────────────────────
+// Le modèle étiquette volontiers en PREDICTION un propos au passé, et en
+// COMMITMENT une simple conduite de débat (« je voudrais continuer »). Sur un
+// rapport réel, deux énoncés sur quinze étaient exploitables. On vérifie donc
+// la forme avant de consigner : ces contrôles sont déterministes.
+
+// Le futur est marqué : périphrase (« va poser »), futur simple (« seront »),
+// ou repère temporel explicite.
+// Le futur simple est reconnu APRÈS un sujet : sans cette ancre, « les patrons »
+// ou « environs » passeraient pour des verbes au futur.
+const FUTURE_MARKERS = /\b(?:vais|vas|va|allons|allez|vont)\s+\p{L}{3,}|\b(?:je|tu|il|elle|on|nous|vous|ils|elles|qui)\s+(?:\p{L}+\s+){0,2}\p{L}{2,}(?:rai|ras|ra|rons|rez|ront)(?![\p{L}])|\b(?:sera|seront|serai|serez|serons|aura|auront|aurai|aurez|aurons)\b|\b(?:demain|bient[oô]t|prochaine?s?|d['’]ici|dor[ée]navant|[àa] l['’]avenir)\b|\bwill\b|\bgoing to\b/iu;
+
+// Un engagement suppose que le locuteur se lie lui-même.
+const COMMISSIVE_MARKERS = /\b(?:je|nous|on)\s+(?:vais|vas|allons|va)\s+\p{L}{3,}|\bje\s+m['’]engage\b|\bnous\s+nous\s+engageons\b|\bje\s+promets\b|\b(?:je|nous)\s+\p{L}{2,}(?:rai|rons)\b|\b(?:i|we)\s+will\b/iu;
+
+// Verbes de conduite du débat : « je voudrais continuer » n'engage à rien.
+const DEBATE_MANAGEMENT = /\b(?:continuer|poursuivre|r[ée]pondre|d[ée]battre|parler|dire|ajouter|terminer|finir|revenir|pr[ée]ciser|expliquer|commencer|interrompre)\b/i;
+
+// Le modèle décrit le propos au lieu de le citer.
+const META_REPORT = /^[A-ZÀ-Þ][\p{L}'’-]*\s+(?:affirme|d[ée]clare|dit|explique|soutient|pr[ée]tend|estime|ajoute|indique|annonce|says?|claims?|states?)\b/u;
+
+// Bégaiement ou reprise : « Je, je, si vous voulez… ».
+// « \b » de JavaScript ignore les lettres accentuées : « La laïcité » était pris
+// pour une répétition de « la ». D'où la sentinelle Unicode explicite.
+const STUTTER = /^(\p{L}{1,6})[,\s]+\1(?![\p{L}])/iu;
+
+/**
+ * Un énoncé de discours est-il exploitable ?
+ * @param {string} kind        PREDICTION ou COMMITMENT
+ * @param {string} statement   énoncé transcrit
+ * @param {function} isNoise   détecteur de bruit de transcription (injecté :
+ *                             il vit dans le service worker)
+ */
+function isUsableDiscourseStatement(kind, statement, isNoise) {
+  const t = String(statement || '').trim();
+  if (!t) return false;
+  if (typeof isNoise === 'function' && isNoise(t)) return false;
+  if (STUTTER.test(t)) return false;
+  if (META_REPORT.test(t)) return false;
+
+  const words = t.split(/\s+/).filter(Boolean).length;
+  if (words < 5) return false;                 // trop bref pour porter un engagement
+
+  if (kind === EVENT_TYPES.PREDICTION) {
+    // Sans marque de futur, l'énoncé parle du passé ou du présent.
+    return FUTURE_MARKERS.test(t);
+  }
+
+  if (kind === EVENT_TYPES.COMMITMENT) {
+    if (!COMMISSIVE_MARKERS.test(t)) return false;
+    // Un engagement qui ne porte que sur le déroulement de l'échange n'en est pas un.
+    if (words < 9 && DEBATE_MANAGEMENT.test(t)) return false;
+    return true;
+  }
+
+  return false;
+}
+
+/** Ne garde que les énoncés exploitables, en nettoyant l'étiquette de diarisation. */
+function filterUsableDiscourseItems(items, isNoise) {
+  return (Array.isArray(items) ? items : []).filter(it => {
+    if (!it) return false;
+    const statement = String(it.statement || '').replace(/^\[[^\]]{1,40}\]\s*/, '').trim();
+    return isUsableDiscourseStatement(it.kind, statement, isNoise);
+  });
+}
+
 function discourseEventFromItem(session, item) {
   const now = Date.now();
   return {
@@ -272,7 +339,13 @@ function upsertDiscourseEvent(session, item) {
   if (!DISCOURSE_TYPES.includes(item.kind)) return null;
 
   const fingerprint = claimFingerprint(item.statement);
-  const existing = session.events.find(e => e.type === item.kind && e.fingerprint === fingerprint);
+  let existing = session.events.find(e => e.type === item.kind && e.fingerprint === fingerprint);
+  if (!existing) {
+    // « Je voudrais continuer » et « Maintenant je voudrais continuer » sont le
+    // même énoncé : la reprise est fréquente à l'oral.
+    existing = session.events.find(e =>
+      e.type === item.kind && claimSimilarity(item.statement, e.text) >= 0.6);
+  }
   if (existing) {
     existing.updatedAt = Date.now();
     if (item.speaker && !existing.speaker) existing.speaker = item.speaker;

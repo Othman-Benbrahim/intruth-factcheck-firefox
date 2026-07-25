@@ -2716,17 +2716,24 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
     }
 
     if (discourseItems.length) {
-      const enriched = discourseItems.map(it => ({
+      // Même exigence que pour les affirmations : un fragment mal transcrit ou
+      // un propos au passé n'a rien à faire dans les prédictions.
+      const usable = filterUsableDiscourseItems(discourseItems, looksLikeTranscriptionNoise);
+      if (usable.length !== discourseItems.length) {
+        console.log('[discours] énoncés écartés :', discourseItems.length - usable.length);
+      }
+
+      const enriched = usable.map(it => ({
         ...it,
         statement: String(it.statement || '').replace(/^\[[^\]]{1,40}\]\s*/, '').trim(),
         speaker:   normalizeSpeakerLabel(it.speaker) || normalizeSpeakerLabel(dominantSpeaker),
         speakerId: dominantSpeakerId ?? null,
       }));
-      recordDiscourseItems(enriched);
-      if (activeTabId) {
+      if (enriched.length) recordDiscourseItems(enriched);
+      if (enriched.length && activeTabId) {
         browserAPI.tabs.sendMessage(activeTabId, { type: 'NEW_DISCOURSE', items: enriched }).catch(() => {});
       }
-      console.log('[pipeline] discourse events:', enriched.length);
+      if (enriched.length) console.log('[pipeline] discourse events:', enriched.length);
     }
 
     const results = normalizeVerdictResults(aggregated);
