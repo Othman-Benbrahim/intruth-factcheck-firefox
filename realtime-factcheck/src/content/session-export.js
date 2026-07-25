@@ -76,18 +76,61 @@ function verdictLabelFr(v) {
 
 // ── Construction du Markdown ──────────────────────────────────────────────────
 
-function buildMarkdown() {
-  const pageTitle  = document.title || 'Fact Check Session';
+// ── Lecture de la mémoire de session (background) ───────────────────────────
+// L'historique vit désormais dans le background : il survit à une navigation
+// ou à un rechargement de la page. On retombe sur le journal local si le
+// background ne répond pas.
+
+function entriesFromSession(session) {
+  if (!session || !Array.isArray(session.events)) return [];
+  return session.events
+    .filter(e => e.type === 'CLAIM')
+    .map(e => ({
+      timestamp:      new Date(e.createdAt).toISOString(),
+      secondsElapsed: Math.round((e.offsetMs || 0) / 1000),
+      claim:          e.text,
+      verdict:        e.verdict,
+      confidence:     e.confidence,
+      explanation:    e.explanation,
+      speakerConfidence: e.speakerConfidence,
+      speakerName:    e.speaker || (e.speakerId && session.speakers ? session.speakers[e.speakerId] : null),
+      sources:        e.sources || [],
+      corroboration:  e.corroboration || null,
+      status:         e.status,
+      mediaTimestamp: e.mediaTimestamp || null,
+    }));
+}
+
+function requestSession() {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'GET_SESSION' }, (res) => {
+        if (chrome.runtime.lastError) { resolve(null); return; }
+        resolve(res || null);
+      });
+    } catch (_) { resolve(null); }
+  });
+}
+
+function buildMarkdown(entries, meta) {
+  const rows = Array.isArray(entries) && entries.length ? entries : sessionLog;
+  const pageTitle  = (meta && meta.title) || document.title || 'Fact Check Session';
   const exportDate = new Date().toLocaleString();
 
-  const count = (v) => sessionLog.filter(e => e.verdict === v).length;
+  const count = (v) => rows.filter(e => e.verdict === v).length;
 
   const lines = [];
   lines.push('# Rapport de fact-checking');
   lines.push('');
   lines.push('- **Source :** ' + mdInline(pageTitle));
   lines.push('- **Exporté le :** ' + exportDate);
-  lines.push('- **Affirmations détectées :** ' + sessionLog.length);
+  lines.push('- **Affirmations détectées :** ' + rows.length);
+  if (meta && meta.durationMs) {
+    const mn = Math.floor(meta.durationMs / 60000);
+    lines.push('- **Durée de session :** ' + mn + ' min');
+  }
+  const enAttente = rows.filter(e => e.status === 'pending').length;
+  if (enAttente) lines.push('- **Vérifications encore en cours :** ' + enAttente);
   lines.push('');
   lines.push('## Résumé');
   lines.push('');
@@ -103,7 +146,7 @@ function buildMarkdown() {
   // groupement par locuteur (les "Speaker N" non résolus et "Other" → Inconnu)
   const groups = {};
   const order  = [];
-  sessionLog.forEach((entry, i) => {
+  rows.forEach((entry, i) => {
     const raw = entry.speakerName;
     const spk = (raw && !raw.match(/^Speaker\s*\d+$/i) && raw !== 'Other') ? raw : 'Inconnu';
     if (!groups[spk]) { groups[spk] = []; order.push(spk); }
@@ -133,6 +176,13 @@ function buildMarkdown() {
         lines.push('');
       }
       lines.push('- **Conviction du locuteur :** ' + (entry.speakerConfidence || 'N/A'));
+      if (entry.corroboration) {
+        const c = entry.corroboration;
+        const bits = [c.band || '?', (c.voices || 0) + ' voix indépendante' + ((c.voices || 0) > 1 ? 's' : '')];
+        if (c.primaries) bits.push(c.primaries + ' source' + (c.primaries > 1 ? 's' : '') + ' primaire' + (c.primaries > 1 ? 's' : ''));
+        if (c.circular)  bits.push('reprise circulaire détectée');
+        lines.push('- **Corroboration :** ' + bits.join(' · '));
+      }
       if (entry.sources && entry.sources.length) {
         const srcs = entry.sources.map((url, j) => {
           return /^https?:\/\//.test(url) ? '[Source ' + (j + 1) + '](' + url + ')' : mdInline(url);
@@ -153,13 +203,22 @@ function buildMarkdown() {
 
 // ── Export (Markdown) ─────────────────────────────────────────────────────────
 
-function exportPDF() {
-  if (!sessionLog.length) {
+async function exportPDF() {
+  const res     = await requestSession();
+  const entries = entriesFromSession(res && res.session);
+  const rows    = entries.length ? entries : sessionLog;
+
+  if (!rows.length) {
     alert('Aucune affirmation détectée pour le moment.');
     return;
   }
 
-  const md   = buildMarkdown();
+  const meta = {
+    title:      (res && res.session && res.session.source && res.session.source.title) || document.title,
+    durationMs: (res && res.summary && res.summary.durationMs) || 0,
+  };
+
+  const md   = buildMarkdown(rows, meta);
   const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
   const url  = URL.createObjectURL(blob);
 
