@@ -229,7 +229,8 @@ function buildMarkdown(entries, meta) {
   const order  = [];
   rows.forEach((entry, i) => {
     const raw = entry.speakerName;
-    const spk = (raw && !raw.match(/^Speaker\s*\d+$/i) && raw !== 'Other') ? raw : 'Inconnu';
+    const unknownish = /^(unknown|inconnue?|other|autre|n\/a|none|null|\?)$/i;
+    const spk = (raw && !raw.match(/^Speaker\s*\d+$/i) && !unknownish.test(String(raw).trim())) ? raw : 'Inconnu';
     if (!groups[spk]) { groups[spk] = []; order.push(spk); }
     groups[spk].push({ entry, i });
   });
