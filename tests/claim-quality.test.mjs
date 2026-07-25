@@ -168,8 +168,30 @@ describe('étiquette de diarisation dans le texte', () => {
     assert.ok(src, 'enrichissement des énoncés de discours introuvable');
     assert.match(src[0], /statement:[\s\S]{0,120}replace\(/,
       'le préfixe doit être retiré de l’énoncé');
-    assert.match(src[0], /normalizeSpeakerLabel\(it\.speaker\)/,
-      '« Speaker 1 » ne doit pas s’afficher comme nom de locuteur');
+    assert.match(src[0], /canonicalSpeakerName\(it\.speaker/,
+      '« Speaker 1 » ne doit pas s’afficher, et « Jean-Luc Mélenchon » doit se réduire à « Mélenchon »');
+  });
+});
+
+describe('variantes du nom d’un même locuteur', () => {
+  // Le modèle alterne « Mélenchon » et « Jean-Luc Mélenchon » : sans réduction,
+  // le rapport affichait deux libellés pour la même personne.
+  test('une forme longue se réduit au nom déjà retenu', () => {
+    assert.equal(sw.canonicalSpeakerName('Jean-Luc Mélenchon', { '0': 'Mélenchon' }), 'Mélenchon');
+    assert.equal(sw.canonicalSpeakerName('M. Zemmour', { '1': 'Zemmour' }), 'Zemmour');
+  });
+
+  test('un nom déjà canonique est inchangé', () => {
+    assert.equal(sw.canonicalSpeakerName('Mélenchon', { '0': 'Mélenchon' }), 'Mélenchon');
+  });
+
+  test('un locuteur inconnu du groupe garde son nom', () => {
+    assert.equal(sw.canonicalSpeakerName('Macron', { '0': 'Mélenchon' }), 'Macron');
+  });
+
+  test('les libellés vides restent neutralisés', () => {
+    assert.equal(sw.canonicalSpeakerName('Unknown', { '0': 'Mélenchon' }), null);
+    assert.equal(sw.canonicalSpeakerName('Speaker 1', {}), null);
   });
 });
 

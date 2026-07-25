@@ -162,6 +162,38 @@ describe('pertinence des capteurs à correspondance de titre', () => {
     assert.equal(kept[0].source, 'web');
   });
 
+  // Second lot, relevé sur un débat où le filtre initial laissait passer des
+  // articles ne partageant qu'un mot passe-partout avec l'affirmation.
+  const HORS_SUJET_2 = [
+    ["Un seul million d'italiens est resté.", 'Sabrina Salerno'],
+    ['Le tiers des personnes qui viennent sont des étudiants.', 'Tiers-lieu'],
+    ['On devrait trouver six millions de personnes de plus en France en dix ans.', 'Attentats du 13 novembre 2015 en France'],
+    ["Nous sommes le seul pays d'Europe qui dit nous sommes des gallo-romains.", 'Albert (Somme)'],
+    ["Il y avait trois millions d'italiens qui étaient venus entre 1870 et 1940.", 'Guerre franco-allemande de 1870'],
+  ];
+
+  for (const [claim, title] of HORS_SUJET_2) {
+    test(`« ${title} » est écarté (un seul mot commun ne suffit pas)`, () => {
+      assert.equal(sw.isTopicallyRelevant(claim, wiki(title)), false);
+    });
+  }
+
+  test('un quantificateur ne rend pas un article pertinent', () => {
+    assert.ok(sw.TOPIC_LOW_SIGNAL.has('tiers'), '« tiers » doit être non discriminant');
+    assert.ok(sw.TOPIC_LOW_SIGNAL.has('franc'), '« France » doit être non discriminant');
+  });
+
+  test('un titre court dont un mot fort correspond reste pertinent', () => {
+    assert.equal(sw.isTopicallyRelevant(
+      "Les politiques ont favorisé l'extrême diversité avec l'invasion islamique",
+      wiki('Islam en France')), true);
+  });
+
+  test('« nous sommes » ne renvoie pas au département de la Somme', () => {
+    assert.equal(sw.isTopicallyRelevant(
+      'Nous sommes le seul pays qui dit cela', wiki('Albert (Somme)')), false);
+  });
+
   test('une affirmation trop courte ne fait écarter personne', () => {
     assert.equal(sw.isTopicallyRelevant('oui', wiki('Indochine (groupe)')), true);
   });
