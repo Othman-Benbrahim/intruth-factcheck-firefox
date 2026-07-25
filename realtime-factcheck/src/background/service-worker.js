@@ -543,7 +543,7 @@ function reviewLanguageInstruction() {
 function languageInstruction() {
   const name = LANGUAGE_NAMES[OUTPUT_LANGUAGE];
   if (!name) return '';
-  return `\n\nLANGUAGE REQUIREMENT: Write the "claim" and "explanation" fields in ${name}, regardless of the language of the transcript or sources. Only the "verdict" values (TRUE, FALSE, SUBSTANTIALLY TRUE, MISLEADING, UNVERIFIABLE) stay in English.`;
+  return `\n\nLANGUAGE REQUIREMENT: Write EVERY "claim" and "explanation" field in ${name}, without exception, regardless of the language of the transcript or sources. Only the "verdict" values (TRUE, FALSE, SUBSTANTIALLY TRUE, MISLEADING, UNVERIFIABLE) stay in English.`;
 }
 
 const EVALUATE_PROMPT = `
@@ -580,6 +580,7 @@ Rules:
 - Ignore opinions, jokes, filler, greetings, vague claims, and claims that cannot be checked.
 - Evaluate claims as they were made at the time of the recording when a date is provided.
 - "used_sources": when numbered sources are provided in the user message, list ONLY the numbers of the sources that directly support your verdict; exclude off-topic or unused ones. If no sources are provided or none are relevant, return [].
+- NEVER refer to a source by its number inside "explanation" (no "[1]", no "source 2"). The reader never sees those numbers. State the fact plainly instead.
 `;
 
 // ── Speaker parsing (mirrors overlay.js) ─────────────────────────────────────
@@ -1856,7 +1857,25 @@ function normalizeVerdictItem(item) {
     if (Number.isFinite(numeric)) normalized.confidence = numeric > 1 ? numeric / 100 : numeric;
   }
 
+  // Filet : le modèle renvoie parfois à un numéro de source (« selon [1] »).
+  // Ces repères n'existent pas pour le lecteur, qui voit des liens nommés.
+  if (normalized.explanation) {
+    normalized.explanation = stripSourceReferences(normalized.explanation);
+  }
+
   return normalized;
+}
+
+function stripSourceReferences(text) {
+  return String(text || '')
+    // le connecteur part avec la référence, sinon il reste orphelin
+    .replace(/[,\s]*(?:selon|d'apr[èe]s|cf\.?|voir)\s*\[\s*\d+(?:\s*[,;]\s*\d+)*\s*\]/gi, '')
+    .replace(/\s*\[\s*\d+(?:\s*[,;]\s*\d+)*\s*\]/g, '')
+    .replace(/\s*\((?:d'apr[èe]s|selon)?\s*sources?\s*\d+(?:\s*[,;]\s*\d+)*\s*\)/gi, '')
+    .replace(/[,\s]*(?:selon|d'apr[èe]s|cf\.?|voir)\s+(?:la\s+)?sources?\s*\d+(?:\s*[,;]\s*\d+)*/gi, '')
+    .replace(/\s+([.,;:!?])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 function normalizeVerdictResults(results) {
@@ -2980,6 +2999,11 @@ const TOPIC_LOW_SIGNAL = new Set([
   'premi','derni','nouve','ancie','autre','fois','homme','femme',
   // Quantificateurs : « le tiers des personnes » ne parle pas des tiers-lieux.
   'tiers','quart','moiti','demi','dizai','centa','milla','doubl','tripl',
+  // Mots de structure très fréquents dans les titres encyclopédiques :
+  // « une affaire privée » n'a rien à voir avec « Affaire Vincent Lambert ».
+  'affai','histo','liste','regio','depar','ville','commu','natio','etats','royau',
+  'belgi','allem','espag','itali','angle','breta','suiss','canad','nord','sud',
+  'ouest','est','centr','gener','princ','theor','conce','notio','terme','mot',
 ]);
 
 const TOPIC_STOPWORDS = new Set([
@@ -3031,13 +3055,17 @@ function isTopicallyRelevant(claim, item) {
     titleOverlap++;
     if (!TOPIC_LOW_SIGNAL.has(w)) titleStrong++;
   }
+  // Combien de sujets le titre introduit-il qui ne sont pas dans l'affirmation ?
+  let titleExtra = 0;
+  for (const w of titleWords) {
+    if (!claimWords.has(w) && !TOPIC_LOW_SIGNAL.has(w)) titleExtra++;
+  }
+
   if (titleStrong >= 2) return true;
   if (titleStrong >= 1 && titleOverlap >= 2) return true;
-  if (titleStrong >= 1 && claimWords.size <= 3) return true;
-  // Titre court dont un mot fort correspond : l'article porte sur ce sujet
-  // (« Islam en France »), à la différence d'un titre long où le mot n'est
-  // qu'un détail.
-  if (titleStrong >= 1 && titleWords.size <= 3) return true;
+  // Un seul mot fort suffit si le titre ne parle de rien d'autre : « Religion »
+  // convient, « Religion dans le Nord-Pas-de-Calais » traite d'un autre sujet.
+  if (titleStrong >= 1 && titleExtra === 0) return true;
 
   const snippetWords = topicTokens(item && item.snippet);
   let overlap = 0, strong = 0;
@@ -3046,7 +3074,10 @@ function isTopicallyRelevant(claim, item) {
     overlap++;
     if (!TOPIC_LOW_SIGNAL.has(w)) strong++;
   }
-  return strong >= 2 || (strong >= 1 && overlap / claimWords.size >= 0.33);
+  // Sur une affirmation courte, un seul mot commun donne mécaniquement un ratio
+  // élevé : on exige alors deux correspondances fortes.
+  if (strong >= 2) return true;
+  return strong >= 1 && claimWords.size >= 3 && overlap / claimWords.size >= 0.33;
 }
 
 /** Écarte les réponses hors sujet des capteurs à correspondance de titre. */

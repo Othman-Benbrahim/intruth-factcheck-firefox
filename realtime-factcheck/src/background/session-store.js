@@ -346,6 +346,13 @@ function upsertDiscourseEvent(session, item) {
     existing = session.events.find(e =>
       e.type === item.kind && claimSimilarity(item.statement, e.text) >= 0.6);
   }
+  if (!existing) {
+    // Le même propos peut être étiqueté PREDICTION puis COMMITMENT selon le
+    // fragment entendu. Un seul énoncé doit subsister : on exige une proximité
+    // plus forte que pour une reprise de même type.
+    existing = session.events.find(e =>
+      DISCOURSE_TYPES.includes(e.type) && claimSimilarity(item.statement, e.text) >= 0.8);
+  }
   if (existing) {
     existing.updatedAt = Date.now();
     if (item.speaker && !existing.speaker) existing.speaker = item.speaker;
