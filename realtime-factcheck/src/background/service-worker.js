@@ -25,6 +25,7 @@ let SERPER_KEY   = '';
 let FACTCHECK_KEY = '';           // clé Google Fact Check Tools (facultative, BYOK)
 let OUTPUT_LANGUAGE = 'fr';        // langue de sortie des verdicts (claim + explanation)
 let RESOLVE_PRONOUNS = false;      // résolution des pronoms (pilotée depuis le tiroir du panneau)
+let DISCOURSE_ENABLED = false;     // détection des types de discours (désactivée par défaut)
 
 const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -494,8 +495,9 @@ async function loadKeys() {
   OUTPUT_LANGUAGE = local.outputLanguage || 'fr';
   try {
     const st = await browserAPI.storage.local.get(['intruthSettings']);
-    RESOLVE_PRONOUNS = Boolean(st && st.intruthSettings && st.intruthSettings.resolvePronouns);
-  } catch (_) { RESOLVE_PRONOUNS = false; }
+    RESOLVE_PRONOUNS  = Boolean(st && st.intruthSettings && st.intruthSettings.resolvePronouns);
+    DISCOURSE_ENABLED = Boolean(st && st.intruthSettings && st.intruthSettings.discourseEnabled);
+  } catch (_) { RESOLVE_PRONOUNS = false; DISCOURSE_ENABLED = false; }
 }
 
 // ── Langue de sortie des verdicts (claim + explanation) ─────────────────────
@@ -514,6 +516,26 @@ const LANGUAGE_LOCALE = {
   ru: { gl: 'ru', hl: 'ru' }, pl: { gl: 'pl', hl: 'pl' }, sv: { gl: 'se', hl: 'sv' },
   tr: { gl: 'tr', hl: 'tr' },
 };
+// Détection des types de discours — ajoutée au même appel que la détection
+// d'affirmations (pas de second appel LLM, donc pas de coût doublé).
+// Règle cardinale : ces énoncés sont CONSIGNÉS, jamais jugés.
+function discourseInstruction() {
+  if (!DISCOURSE_ENABLED) return '';
+  return `
+
+ADDITIONAL TASK — discourse detection.
+Besides factual claims, also report statements that are NOT fact-checkable now but matter for later review:
+- PREDICTION: an explicit statement about a future outcome ("unemployment will fall next year").
+- COMMITMENT: an explicit promise or pledge by the speaker ("I will cut taxes").
+Add them to the SAME array, using this shape:
+{ "kind": "PREDICTION" | "COMMITMENT", "statement": "short quote of the statement", "speaker": "name or Unknown", "horizon": "stated deadline or null" }
+Rules for these items:
+- NEVER give them a verdict, a truth value or a confidence. They are recorded, not judged.
+- At most 2 per response, in addition to the factual claims.
+- Only report them when the wording is explicit. If in doubt, omit the item.
+- A statement about the past or present is a factual claim, not a PREDICTION.`;
+}
+
 function languageInstruction() {
   const name = LANGUAGE_NAMES[OUTPUT_LANGUAGE];
   if (!name) return '';
@@ -2384,8 +2406,10 @@ try {
   browserAPI.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !changes.intruthSettings) return;
     const v = changes.intruthSettings.newValue;
-    RESOLVE_PRONOUNS = Boolean(v && v.resolvePronouns);
-    console.log('[settings] résolution des pronoms :', RESOLVE_PRONOUNS ? 'activée' : 'désactivée');
+    RESOLVE_PRONOUNS  = Boolean(v && v.resolvePronouns);
+    DISCOURSE_ENABLED = Boolean(v && v.discourseEnabled);
+    console.log('[settings] pronoms :', RESOLVE_PRONOUNS ? 'on' : 'off',
+                '| discours :', DISCOURSE_ENABLED ? 'on' : 'off');
   });
 } catch (_) {}
 
@@ -2493,13 +2517,14 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
     });
 
     const aggregated = [];
+    const discourseItems = [];
     const parseFailures = [];
 
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batchText = batches[batchIndex];
 
       const raw = await callLLM(
-        `${titleContext}Transcript chunk ${batchIndex + 1}/${batches.length}: "${batchText}"${alreadyChecked}${lexicalContext}${languageInstruction()}`,
+        `${titleContext}Transcript chunk ${batchIndex + 1}/${batches.length}: "${batchText}"${alreadyChecked}${lexicalContext}${languageInstruction()}${discourseInstruction()}`,
         EVALUATE_PROMPT
       );
 
@@ -2523,7 +2548,14 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
         continue;
       }
 
-      const batchResults = normalizeVerdictResults(parsed.results);
+      // Les énoncés de discours sont écartés AVANT toute normalisation : sinon
+      // une prédiction serait traitée comme une affirmation et recevrait un verdict.
+      const split = DISCOURSE_ENABLED
+        ? splitDiscourseItems(parsed.results)
+        : { claims: parsed.results, discourse: [] };
+      if (split.discourse.length) discourseItems.push(...split.discourse);
+
+      const batchResults = normalizeVerdictResults(split.claims);
       aggregated.push(...batchResults);
 
       setAnalysisDebug('llm_json_parsed', {
@@ -2532,6 +2564,19 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
         resultCount: batchResults.length,
         firstResultPreview: batchResults[0] ? previewLLMResponse(JSON.stringify(batchResults[0]), 220) : '',
       });
+    }
+
+    if (discourseItems.length) {
+      const enriched = discourseItems.map(it => ({
+        ...it,
+        speaker:   it.speaker || dominantSpeaker || null,
+        speakerId: dominantSpeakerId ?? null,
+      }));
+      recordDiscourseItems(enriched);
+      if (activeTabId) {
+        browserAPI.tabs.sendMessage(activeTabId, { type: 'NEW_DISCOURSE', items: enriched }).catch(() => {});
+      }
+      console.log('[pipeline] discourse events:', enriched.length);
     }
 
     const results = normalizeVerdictResults(aggregated);
@@ -3066,6 +3111,14 @@ let currentSession = null;
 function sessionSafe(label, fn) {
   try { return fn(); }
   catch (err) { console.error('[session] ' + label + ' :', err && err.message); return null; }
+}
+
+function recordDiscourseItems(items) {
+  if (!currentSession || !Array.isArray(items) || !items.length) return;
+  sessionSafe('discours', () => {
+    for (const it of items) upsertDiscourseEvent(currentSession, it);
+    scheduleSessionSave(currentSession);
+  });
 }
 
 function recordClaimResults(results) {

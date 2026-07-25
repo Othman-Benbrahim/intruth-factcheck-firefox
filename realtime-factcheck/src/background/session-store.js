@@ -19,12 +19,20 @@
 // Un seul type en Phase 1. Le modèle est volontairement générique pour
 // accueillir les types de discours ultérieurs sans migration de données.
 const EVENT_TYPES = Object.freeze({
-  CLAIM: 'CLAIM',
+  CLAIM:      'CLAIM',       // affirmation factuelle → vérifiable
+  PREDICTION: 'PREDICTION',  // énoncé sur l'avenir → non vérifiable aujourd'hui
+  COMMITMENT: 'COMMITMENT',  // promesse ou engagement du locuteur
 });
+
+// Types de discours : consignés, jamais jugés. Aucun verdict ne leur est
+// attribué — une prédiction n'est ni vraie ni fausse au moment où elle est
+// prononcée, et un engagement encore moins.
+const DISCOURSE_TYPES = Object.freeze([EVENT_TYPES.PREDICTION, EVENT_TYPES.COMMITMENT]);
 
 const EVENT_STATUS = Object.freeze({
   PENDING:  'pending',   // vérification en cours
   RESOLVED: 'resolved',  // verdict sourcé rendu
+  RECORDED: 'recorded',  // consigné sans jugement (types de discours)
 });
 
 // Plafond de sécurité : au-delà, on ne perd pas les événements récents mais on
@@ -203,16 +211,94 @@ function setSessionSpeakers(session, speakerIdToName) {
   }
 }
 
+// ── Types de discours ───────────────────────────────────────────────────────
+
+/** Reconnaît un item de discours dans la réponse brute du modèle. */
+function discourseKindOf(item) {
+  if (!item || typeof item !== 'object') return null;
+  const raw = String(item.kind || item.event_type || item.discourse_type || '').trim().toUpperCase();
+  return DISCOURSE_TYPES.includes(raw) ? raw : null;
+}
+
+/** Énoncé porté par un item de discours, quel que soit le nom du champ. */
+function discourseStatement(item) {
+  return String(item.statement || item.text || item.claim || item.content || '').trim();
+}
+
+/**
+ * Sépare les items de discours des affirmations factuelles.
+ * Appelé AVANT toute normalisation de verdict : sans quoi une prédiction
+ * serait traitée comme une affirmation et recevrait un verdict.
+ */
+function splitDiscourseItems(rawResults) {
+  const claims = [];
+  const discourse = [];
+  for (const item of (Array.isArray(rawResults) ? rawResults : [])) {
+    const kind = discourseKindOf(item);
+    if (!kind) { claims.push(item); continue; }
+    const statement = discourseStatement(item);
+    if (!statement) continue;               // item de discours vide : ignoré
+    discourse.push({
+      kind,
+      statement,
+      speaker: item.speaker || null,
+      horizon: item.horizon || item.deadline || null,
+    });
+  }
+  return { claims, discourse };
+}
+
+function discourseEventFromItem(session, item) {
+  const now = Date.now();
+  return {
+    id:        makeEventId(item.kind),
+    type:      item.kind,
+    createdAt: now,
+    updatedAt: now,
+    offsetMs:  session ? Math.max(0, now - session.startedAt) : 0,
+    text:      item.statement,
+    fingerprint: claimFingerprint(item.statement),
+    status:    EVENT_STATUS.RECORDED,
+    speaker:   item.speaker || null,
+    speakerId: (item.speakerId !== undefined && item.speakerId !== null) ? String(item.speakerId) : null,
+    horizon:   item.horizon || null,
+    // Volontairement absents : verdict, confidence, sources.
+  };
+}
+
+/** Consigne un énoncé de discours, sans doublon. */
+function upsertDiscourseEvent(session, item) {
+  if (!session || !item || !item.kind || !item.statement) return null;
+  if (!DISCOURSE_TYPES.includes(item.kind)) return null;
+
+  const fingerprint = claimFingerprint(item.statement);
+  const existing = session.events.find(e => e.type === item.kind && e.fingerprint === fingerprint);
+  if (existing) {
+    existing.updatedAt = Date.now();
+    if (item.speaker && !existing.speaker) existing.speaker = item.speaker;
+    if (item.horizon && !existing.horizon) existing.horizon = item.horizon;
+    return existing;
+  }
+
+  const fresh = discourseEventFromItem(session, item);
+  session.events.push(fresh);
+  if (session.events.length > MAX_EVENTS) {
+    session.events.splice(0, session.events.length - MAX_EVENTS);
+  }
+  return fresh;
+}
+
 // ── Lecture / synthèse ──────────────────────────────────────────────────────
 
 function sessionSummary(session) {
   const empty = {
-    total: 0, resolved: 0, pending: 0, durationMs: 0,
-    byVerdict: {}, bySpeaker: {},
+    total: 0, resolved: 0, pending: 0, durationMs: 0, discourse: 0,
+    byVerdict: {}, bySpeaker: {}, byDiscourse: {},
   };
   if (!session) return empty;
 
   const claims = session.events.filter(e => e.type === EVENT_TYPES.CLAIM);
+  const discourse = session.events.filter(e => DISCOURSE_TYPES.includes(e.type));
   const byVerdict = {};
   const bySpeaker = {};
   let resolved = 0;
@@ -225,10 +311,15 @@ function sessionSummary(session) {
     bySpeaker[s] = (bySpeaker[s] || 0) + 1;
   }
 
+  const byDiscourse = {};
+  for (const e of discourse) byDiscourse[e.type] = (byDiscourse[e.type] || 0) + 1;
+
   return {
     total:      claims.length,
     resolved,
     pending:    claims.length - resolved,
+    discourse:  discourse.length,
+    byDiscourse,
     durationMs: (session.endedAt || Date.now()) - session.startedAt,
     byVerdict,
     bySpeaker,
