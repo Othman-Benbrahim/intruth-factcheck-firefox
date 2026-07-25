@@ -125,6 +125,7 @@ const SW_EXPORTS = `{
   SENSOR_KEYWORDS, routeSensors, ESPN_LEAGUES,
   EU_MARKERS, EU_KNOWN_ACTS, matchEuKnownActs, buildEurLexSparql, eurLexLink,
   US_MARKERS, usLegalTerms, FEDREG_TYPES,
+  FR_LAW_MARKERS, frenchLawTerms, legifranceArticleUrl, readMcpBody, JUSTICELIBRE_ENDPOINT,
   resolveDismissivePronouns, getOpponentName, speakerConfidenceFromLexical,
   extractLexical, parseSpeakersFromTitle,
   relevanceFilterItems, selectCitedSources, dedupeByLink,
