@@ -140,6 +140,41 @@ const OVERLAY_EXPORTS = `{
   setSettings(o) { settings = Object.assign({}, DEFAULT_SETTINGS, o); }
 }`;
 
+const SESSION_EXPORTS = `{
+  EVENT_TYPES, EVENT_STATUS, MAX_EVENTS,
+  makeEventId, claimFingerprint, claimSimilarity,
+  createSession, endSession, isSessionActive,
+  findClaimEvent, claimEventFromResult, upsertClaimEvent, setSessionSpeakers,
+  sessionSummary, serializeSession, deserializeSession,
+  saveSessionNow, loadStoredSession, clearStoredSession
+}`;
+
+/**
+ * Magasin de session, avec un stockage en mémoire contrôlable.
+ * Chaque appel renvoie une instance neuve : les tests de persistance doivent
+ * partir d'un état propre.
+ */
+export function loadSessionStore() {
+  const backing = new Map();
+  const storage = {
+    async get(keys) {
+      const list = Array.isArray(keys) ? keys : [keys];
+      const out = {};
+      for (const k of list) if (backing.has(k)) out[k] = backing.get(k);
+      return out;
+    },
+    async set(obj) { for (const [k, v] of Object.entries(obj)) backing.set(k, v); },
+    async remove(keys) { for (const k of (Array.isArray(keys) ? keys : [keys])) backing.delete(k); },
+  };
+  const api = { storage: { local: storage } };
+  const store = evaluate(
+    join(EXT, 'src', 'background', 'session-store.js'),
+    SESSION_EXPORTS,
+    { browser: api, chrome: api }
+  );
+  return { ...store, __storage: backing };
+}
+
 let swCache = null;
 let overlayCache = null;
 
