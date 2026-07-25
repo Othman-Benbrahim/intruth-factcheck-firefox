@@ -584,19 +584,74 @@ Rules:
 
 // ── Speaker parsing (mirrors overlay.js) ─────────────────────────────────────
 
+// Mots capitalisés qui ne désignent pas une personne : sans ce tri, « France »
+// ou « YouTube » seraient pris pour des participants.
+const TITLE_NON_NAMES = new Set([
+  'youtube','france','direct','live','debat','interview','emission','replay','video',
+  'extrait','integrale','partie','episode','news','info','actu','streaming','chaine',
+  'officiel','officielle','exclusif','reportage','documentaire','podcast','edition',
+  'debate','presidential','election','conference','meeting','summit','discussion',
+  'entretien','echange','rencontre','confrontation','duel','face','a','special',
+  'mon','ma','mes','ton','ta','tes','son','sa','ses','notre','nos','votre','vos','leur',
+  'le','la','les','un','une','des','du','de','et','ou','the','with','vs','versus',
+  'face','contre','avec','entre','chez','pour','dans','sur','sans','republique','monde',
+  'paris','europe','union','president','ministre','janvier','fevrier','mars','avril',
+  'juin','juillet','aout','septembre','octobre','novembre','decembre',
+]);
+
+function plainWord(w) {
+  return w.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+/**
+ * Réduit une suite de mots capitalisés au nom de famille utilisable.
+ * Écarte les mots génériques (« Debate », « Presidential ») et les particules
+ * (« Marine Le Pen » → « Pen »). Renvoie null s'il ne reste rien de nominal.
+ */
+function cleanPersonName(candidate) {
+  const parts = String(candidate || '').trim().split(/\s+/)
+    .filter(w => w && !TITLE_NON_NAMES.has(plainWord(w)));
+  return parts.length ? parts[parts.length - 1] : null;
+}
+
+/**
+ * Identifie les participants annoncés dans le titre.
+ *
+ * Trois passes : formats de rôles (« 1 conservative vs 3 liberals »), connecteurs
+ * explicites en français comme en anglais (« face à », « contre », « vs »), puis
+ * repli sur les deux premiers noms propres composés — un titre français annonce
+ * rarement ses intervenants avec un connecteur (« Zemmour : mon débat face à
+ * Glucksmann »), ce qui laissait la liste vide et empêchait toute attribution.
+ */
 function parseSpeakersFromTitle(title) {
   if (!title) return [];
+
   const roleMatch = title.match(/(\d+)\s+([a-z]+(?:\s+[a-z]+)?)\s+(?:vs?\.?|versus)\s+(\d+)\s+([a-z]+(?:\s+[a-z]+)?)/i);
   if (roleMatch) {
     const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
     return [cap(roleMatch[2]), cap(roleMatch[4])];
   }
-  const nameMatch = title.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:and|vs\.?|versus|&)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/);
-  if (nameMatch) {
-    const clean = name => name.trim().split(' ').pop();
-    return [clean(nameMatch[1]), clean(nameMatch[2])];
+
+  // Jusqu'à trois mots : les noms composés et à particule doivent tenir entier.
+  const NAME = "[A-ZÀ-Þ][\\wÀ-ÿ'’-]+(?:\\s+[A-ZÀ-Þ][\\wÀ-ÿ'’-]+){0,2}";
+  const CONNECTORS = "and|vs\\.?|versus|&|face\\s+[àa]|contre|r[ée]pond\\s+[àa]|re[çc]oit|d[ée]bat\\s+avec|avec";
+  const linked = title.match(new RegExp(`(${NAME})\\s*(?:,\\s*)?(?:${CONNECTORS})\\s+(${NAME})`, 'i'));
+  if (linked) {
+    const a = cleanPersonName(linked[1]);
+    const b = cleanPersonName(linked[2]);
+    if (a && b && a !== b) return [a, b];
   }
-  return [];
+
+  // Repli : noms propres composés (« Prénom Nom »), deux suffisent.
+  const compound = title.match(/[A-ZÀ-Þ][\wÀ-ÿ'’-]+(?:\s+[A-ZÀ-Þ][\wÀ-ÿ'’-]+){1,2}/g) || [];
+  const names = [];
+  for (const c of compound) {
+    const name = cleanPersonName(c);
+    if (!name || names.includes(name)) continue;
+    names.push(name);
+    if (names.length === 2) break;
+  }
+  return names.length === 2 ? names : [];
 }
 
 // ── Serper ────────────────────────────────────────────────────────────────────
@@ -1785,7 +1840,9 @@ function normalizeVerdictItem(item) {
 
   const normalized = {
     ...item,
-    claim: String(claim).trim(),
+    // Le transcript envoyé au modèle est étiqueté « [Speaker 0] … » ; le modèle
+    // recopie parfois l'étiquette dans l'affirmation. Elle n'en fait pas partie.
+    claim: String(claim).trim().replace(/^\[[^\]]{1,40}\]\s*/, '').trim(),
     verdict,
   };
 
@@ -2661,7 +2718,8 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
     if (discourseItems.length) {
       const enriched = discourseItems.map(it => ({
         ...it,
-        speaker:   it.speaker || dominantSpeaker || null,
+        statement: String(it.statement || '').replace(/^\[[^\]]{1,40}\]\s*/, '').trim(),
+        speaker:   normalizeSpeakerLabel(it.speaker) || normalizeSpeakerLabel(dominantSpeaker),
         speakerId: dominantSpeakerId ?? null,
       }));
       recordDiscourseItems(enriched);
