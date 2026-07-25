@@ -42,6 +42,7 @@
     "https://*.wikipedia.org/*",
     "https://www.wikidata.org/*",
     "https://api.gdeltproject.org/*",
+    "https://justicelibre.org/*",
     "https://www.federalregister.gov/*",
     "https://publications.europa.eu/*",
     "https://site.api.espn.com/*",
