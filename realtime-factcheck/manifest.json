@@ -56,6 +56,7 @@
   ],
   "background": {
     "scripts": [
+      "src/background/session-store.js",
       "src/background/service-worker.js"
     ]
   },
