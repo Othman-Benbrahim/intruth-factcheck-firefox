@@ -3152,6 +3152,32 @@ Hard rules:
 - A prediction or a commitment is not a fallacy.
 `;
 
+/**
+ * Remonte le panneau sur l'onglet actif à partir de la mémoire de session.
+ * Sert après un rechargement de page, mais aussi quand le panneau a été perdu
+ * alors que la session tourne toujours — sans quoi il fallait recharger la page.
+ */
+async function reattachPanel(targetTabId) {
+  const tabId = targetTabId || activeTabId;
+  if (!isCapturing || !tabId) return { reattached: false, reason: 'no-session' };
+
+  let session = currentSession;
+  if (!session) session = await loadStoredSession();
+  if (!session || !isSessionActive(session)) return { reattached: false, reason: 'no-session' };
+
+  try {
+    await browserAPI.tabs.sendMessage(tabId, {
+      type: 'RESTORE_SESSION',
+      session: serializeSession(session),
+    });
+    console.log('[session] panneau rattaché :', session.events.length, 'événements');
+    return { reattached: true, events: session.events.length };
+  } catch (err) {
+    // Le content script n'est pas joignable (page non supportée, onglet fermé).
+    return { reattached: false, reason: 'no-content-script' };
+  }
+}
+
 async function runSessionReview(session) {
   if (!canReviewSession(session)) {
     return { ok: false, reason: 'not-enough-events' };
@@ -3360,6 +3386,10 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         .catch((err) => sendResponse({ ok: false, message: err.message || 'Validation impossible.' }));
       return true;
 
+    case 'REATTACH_PANEL':
+      reattachPanel().then(r => sendResponse(r));
+      return true;
+
     case 'CONTENT_READY':
       // Le content script vient d'être (ré)injecté — typiquement après un
       // rechargement de page. Si une session tourne sur cet onglet, on lui
@@ -3368,21 +3398,12 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const tabId = sender && sender.tab && sender.tab.id;
         if (!isCapturing || !tabId || tabId !== activeTabId) { sendResponse({ restored: false }); return; }
 
-        let session = currentSession;
-        if (!session) session = await loadStoredSession();
-        if (!session || !isSessionActive(session)) { sendResponse({ restored: false }); return; }
-
         // Le flux audio est mort avec la page : l'utilisateur devra relancer
         // la capture (getUserMedia exige un geste utilisateur).
         audioFlowing = false;
 
-        browserAPI.tabs.sendMessage(tabId, {
-          type: 'RESTORE_SESSION',
-          session: serializeSession(session),
-        }).catch(() => {});
-
-        console.log('[session] panneau restauré après rechargement :', session.events.length, 'événements');
-        sendResponse({ restored: true, events: session.events.length });
+        const res = await reattachPanel(tabId);
+        sendResponse({ restored: res.reattached, events: res.events || 0 });
       })();
       return true;
 
@@ -3434,7 +3455,13 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ── Start / stop ──────────────────────────────────────────────────────────────
 
 async function startFactCheck() {
-  if (isCapturing) return;
+  // Une session tourne déjà : plutôt que de ne rien faire, on remonte le
+  // panneau s'il a été perdu (fermeture accidentelle, erreur du content script).
+  if (isCapturing) {
+    const res = await reattachPanel();
+    if (!res.reattached) throw new Error('Session déjà active, mais le panneau est injoignable sur cet onglet.');
+    return;
+  }
 
   await loadKeys();
   if (!DEEPGRAM_KEY) {
