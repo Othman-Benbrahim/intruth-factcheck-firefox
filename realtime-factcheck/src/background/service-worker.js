@@ -2567,6 +2567,15 @@ const UNKNOWN_SPEAKER_LABELS = new Set([
   'unknown', 'inconnu', 'inconnue', 'other', 'autre', 'n/a', 'na', 'none', 'null', '?',
 ]);
 
+// Le modèle alterne « Mélenchon » et « Jean-Luc Mélenchon » : sans réduction au
+// nom déjà retenu, le rapport crée deux libellés pour la même personne.
+function canonicalSpeakerName(name, knownNames) {
+  const clean = normalizeSpeakerLabel(name);
+  if (!clean) return null;
+  const known = Object.values(knownNames || {}).filter(Boolean);
+  return matchKnownParticipant(clean, known) || clean;
+}
+
 function normalizeSpeakerLabel(name) {
   const raw = String(name == null ? '' : name).trim();
   if (!raw) return null;
@@ -2726,7 +2735,7 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       const enriched = usable.map(it => ({
         ...it,
         statement: String(it.statement || '').replace(/^\[[^\]]{1,40}\]\s*/, '').trim(),
-        speaker:   normalizeSpeakerLabel(it.speaker) || normalizeSpeakerLabel(dominantSpeaker),
+        speaker:   canonicalSpeakerName(it.speaker, speakerIdToName) || normalizeSpeakerLabel(dominantSpeaker),
         speakerId: dominantSpeakerId ?? null,
       }));
       if (enriched.length) recordDiscourseItems(enriched);
@@ -2961,10 +2970,26 @@ function applyCorroborationGuard(verdict, confidence, c) {
 const TITLE_MATCH_SENSORS = new Set(['wikipedia', 'wikidata', 'nominatim']);
 
 // Mots trop courants pour signaler quoi que ce soit.
+// Vocabulaire passe-partout du débat politique : un titre qui partage seulement
+// « France » ou « personnes » avec l'affirmation ne traite pas du même sujet.
+// Radicaux sur 5 caractères, comme topicStem.
+const TOPIC_LOW_SIGNAL = new Set([
+  'franc','pays','perso','annee','monde','milli','gens','pourc','perio','epoqu',
+  'siecl','group','point','parti','polit','socie','natio','europ','etran','chose',
+  'probl','quest','situa','momen','endro','place','nombr','total','grand','petit',
+  'premi','derni','nouve','ancie','autre','fois','homme','femme',
+  // Quantificateurs : « le tiers des personnes » ne parle pas des tiers-lieux.
+  'tiers','quart','moiti','demi','dizai','centa','milla','doubl','tripl',
+]);
+
 const TOPIC_STOPWORDS = new Set([
   'nous','vous','pour','avec','dans','cette','comme','entre','plus','tout','tous',
   'toute','etre','sont','ceux','celle','leur','leurs','mais','donc','alors','ainsi',
   'meme','memes','fait','faire','avoir','plusieurs','autre','autres','chez','sans',
+  // Formes verbales fréquentes : « nous sommes » ne parle pas du département
+  // de la Somme, « ont fait » ne parle pas d'un fait divers.
+  'somme','etes','avons','avez','avait','etait','etaie','avaie','seron','etant',
+  'faire','fait','dire','dit','aller','venir','avoir','etres','peut','peuve',
   'this','that','with','from','they','them','their','have','been','were','which',
   'about','there','these','those','would','could','should','than','then','into',
 ]);
@@ -2996,13 +3021,32 @@ function isTopicallyRelevant(claim, item) {
   const claimWords = topicTokens(claim);
   if (claimWords.size < 2) return true;   // trop court pour juger : on laisse passer
 
+  // Un seul mot partagé ne suffit plus : « Le tiers des personnes » et
+  // « Tiers-lieu » n'ont rien en commun. Il faut deux mots, ou un seul s'il
+  // est discriminant et que l'affirmation est courte.
   const titleWords = topicTokens(item && item.title);
-  for (const w of claimWords) if (titleWords.has(w)) return true;
+  let titleOverlap = 0, titleStrong = 0;
+  for (const w of claimWords) {
+    if (!titleWords.has(w)) continue;
+    titleOverlap++;
+    if (!TOPIC_LOW_SIGNAL.has(w)) titleStrong++;
+  }
+  if (titleStrong >= 2) return true;
+  if (titleStrong >= 1 && titleOverlap >= 2) return true;
+  if (titleStrong >= 1 && claimWords.size <= 3) return true;
+  // Titre court dont un mot fort correspond : l'article porte sur ce sujet
+  // (« Islam en France »), à la différence d'un titre long où le mot n'est
+  // qu'un détail.
+  if (titleStrong >= 1 && titleWords.size <= 3) return true;
 
   const snippetWords = topicTokens(item && item.snippet);
-  let overlap = 0;
-  for (const w of claimWords) if (snippetWords.has(w)) overlap++;
-  return overlap >= 2 || (overlap >= 1 && overlap / claimWords.size >= 0.33);
+  let overlap = 0, strong = 0;
+  for (const w of claimWords) {
+    if (!snippetWords.has(w)) continue;
+    overlap++;
+    if (!TOPIC_LOW_SIGNAL.has(w)) strong++;
+  }
+  return strong >= 2 || (strong >= 1 && overlap / claimWords.size >= 0.33);
 }
 
 /** Écarte les réponses hors sujet des capteurs à correspondance de titre. */
@@ -3140,11 +3184,11 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
           }
         }
 
-        const resolvedSpeaker = normalizeSpeakerLabel(learned && learned.name)
+        const resolvedSpeaker = canonicalSpeakerName(learned && learned.name, speakerIdToName)
           || normalizeSpeakerLabel(lateResolved)
           || normalizeSpeakerLabel(dominantSpeaker)
-          || normalizeSpeakerLabel(match.speaker)
-          || normalizeSpeakerLabel(fastResult.speaker);
+          || canonicalSpeakerName(match.speaker, speakerIdToName)
+          || canonicalSpeakerName(fastResult.speaker, speakerIdToName);
 
         const fastWasTrue = fastResult.verdict === 'TRUE' || fastResult.verdict === 'SUBSTANTIALLY TRUE';
         const groundedIsMisleading = match.verdict === 'MISLEADING';
