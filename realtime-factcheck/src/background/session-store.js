@@ -326,6 +326,134 @@ function sessionSummary(session) {
   };
 }
 
+// ── Revue de session ────────────────────────────────────────────────────────
+// La revue s'appuie sur la LISTE DES ÉVÉNEMENTS, jamais sur le transcript brut :
+// un débat de deux heures dépasserait la fenêtre de contexte, et coûterait cher
+// pour un gain nul — l'essentiel a déjà été extrait pendant la session.
+
+const REVIEW_MIN_EVENTS = 3;      // en-deçà, une revue n'a rien à dire
+const REVIEW_MAX_EVENTS = 120;    // borne de contexte et de coût
+
+/** Horodatage lisible à partir d'un décalage en millisecondes. */
+function formatOffset(ms) {
+  const total = Math.max(0, Math.round((ms || 0) / 1000));
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
+  return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+}
+
+/**
+ * Condensé transmis au modèle pour la revue.
+ * Renvoie aussi `texts` : les énoncés réellement prononcés, qui serviront à
+ * valider les citations produites par le modèle.
+ */
+function buildReviewDigest(session, cap) {
+  const limit = typeof cap === 'number' ? cap : REVIEW_MAX_EVENTS;
+  const empty = { lines: [], texts: [], counts: { claims: 0, discourse: 0, unresolved: 0 }, truncated: false };
+  if (!session || !Array.isArray(session.events) || !session.events.length) return empty;
+
+  const ordered = session.events.slice().sort((a, b) => (a.offsetMs || 0) - (b.offsetMs || 0));
+  const truncated = ordered.length > limit;
+  const kept = truncated ? ordered.slice(-limit) : ordered;   // on garde les plus récents
+
+  const lines = [];
+  const texts = [];
+  const counts = { claims: 0, discourse: 0, unresolved: 0 };
+
+  kept.forEach((e, i) => {
+    const who = e.speaker || 'Inconnu';
+    const when = formatOffset(e.offsetMs);
+    const text = String(e.text || '').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    texts.push(text);
+
+    if (e.type === EVENT_TYPES.CLAIM) {
+      counts.claims++;
+      if (e.status !== EVENT_STATUS.RESOLVED) counts.unresolved++;
+      const verdict = e.verdict || 'NON VÉRIFIÉ';
+      lines.push(`#${i + 1} [${verdict}] ${when} ${who} : "${text}"`);
+    } else if (DISCOURSE_TYPES.includes(e.type)) {
+      counts.discourse++;
+      const horizon = e.horizon ? ` (échéance : ${e.horizon})` : '';
+      lines.push(`#${i + 1} [${e.type}] ${when} ${who} : "${text}"${horizon}`);
+    }
+  });
+
+  return { lines, texts, counts, truncated };
+}
+
+function canReviewSession(session) {
+  if (!session || !Array.isArray(session.events)) return false;
+  return session.events.length >= REVIEW_MIN_EVENTS;
+}
+
+// ── Validation des constats de la revue ─────────────────────────────────────
+// Precision > recall : un constat n'est retenu que s'il est vérifiable.
+// Le modèle doit citer un extrait RÉELLEMENT prononcé et nommer le critère
+// structurel qui fonde le constat. Sans les deux, le constat est écarté.
+
+const REVIEW_FALLACY_TYPES = Object.freeze([
+  'FALSE_DILEMMA',   // deux options présentées comme seules possibles
+  'WHATABOUTISM',    // réponse à une critique par une contre-accusation
+  'AD_HOMINEM',      // attaque de la personne au lieu de l'argument
+]);
+
+const REVIEW_QUOTE_MIN_OVERLAP = 0.8;
+const REVIEW_CRITERION_MIN_LENGTH = 15;
+
+function normalizeForQuote(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** L'extrait cité correspond-il à un énoncé réellement prononcé ? */
+function quoteIsGrounded(quote, texts) {
+  const q = normalizeForQuote(quote);
+  if (q.length < 10) return false;
+  const normalized = (texts || []).map(normalizeForQuote);
+  if (normalized.some(t => t.includes(q))) return true;
+  // tolérance à une reformulation mineure
+  const qWords = new Set(q.split(' ').filter(w => w.length > 2));
+  if (!qWords.size) return false;
+  return normalized.some(t => {
+    const tWords = new Set(t.split(' ').filter(w => w.length > 2));
+    if (!tWords.size) return false;
+    let common = 0;
+    for (const w of qWords) if (tWords.has(w)) common++;
+    return common / qWords.size >= REVIEW_QUOTE_MIN_OVERLAP;
+  });
+}
+
+/**
+ * Filtre les constats du modèle. Retourne les constats retenus et le décompte
+ * des constats écartés, avec leur motif — utile pour ajuster le prompt.
+ */
+function validateReviewFindings(rawFindings, texts) {
+  const kept = [];
+  const rejected = { unknownType: 0, ungroundedQuote: 0, missingCriterion: 0 };
+
+  for (const f of (Array.isArray(rawFindings) ? rawFindings : [])) {
+    if (!f || typeof f !== 'object') { rejected.unknownType++; continue; }
+
+    const type = String(f.type || f.kind || '').trim().toUpperCase();
+    if (!REVIEW_FALLACY_TYPES.includes(type)) { rejected.unknownType++; continue; }
+
+    const criterion = String(f.criterion || f.reason || '').trim();
+    if (criterion.length < REVIEW_CRITERION_MIN_LENGTH) { rejected.missingCriterion++; continue; }
+
+    const quote = String(f.quote || f.excerpt || '').trim();
+    if (!quoteIsGrounded(quote, texts)) { rejected.ungroundedQuote++; continue; }
+
+    kept.push({ type, quote, criterion, speaker: f.speaker || null });
+  }
+
+  return { findings: kept, rejected };
+}
+
 // ── Persistance ─────────────────────────────────────────────────────────────
 
 /** Copie transmissible / stockable (aucune référence vive). */
