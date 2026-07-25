@@ -164,7 +164,7 @@ describe('étiquette de diarisation dans le texte', () => {
   });
 
   test('les énoncés de discours sont nettoyés de la même façon', () => {
-    const src = serviceWorkerSrc.match(/const enriched = discourseItems\.map[\s\S]{0,400}?\}\)\);/);
+    const src = serviceWorkerSrc.match(/const enriched = usable\.map[\s\S]{0,400}?\}\)\);/);
     assert.ok(src, 'enrichissement des énoncés de discours introuvable');
     assert.match(src[0], /statement:[\s\S]{0,120}replace\(/,
       'le préfixe doit être retiré de l’énoncé');

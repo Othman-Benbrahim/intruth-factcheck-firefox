@@ -7,7 +7,9 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSessionStore, loadOverlay } from './helpers/load.mjs';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { loadSessionStore, loadOverlay, loadServiceWorker, REPO_ROOT } from './helpers/load.mjs';
 
 describe('reconnaissance d’un item de discours', () => {
   const st = loadSessionStore();
@@ -80,6 +82,119 @@ describe('séparation discours / affirmations', () => {
   test('entrée vide ou invalide → deux listes vides', () => {
     assert.deepEqual(st.splitDiscourseItems([]), { claims: [], discourse: [] });
     assert.deepEqual(st.splitDiscourseItems(null), { claims: [], discourse: [] });
+  });
+});
+
+describe('recevabilité d’un énoncé de discours', () => {
+  // Sur un rapport réel, 13 énoncés sur 15 étaient inexploitables : fragments
+  // mal transcrits, propos au passé étiquetés « prédiction », ou simple
+  // conduite du débat prise pour un engagement.
+  const st = loadSessionStore();
+  const sw = loadServiceWorker();
+  const gate = (kind, texte) => st.isUsableDiscourseStatement(kind, texte, sw.looksLikeTranscriptionNoise);
+
+  describe('une prédiction doit parler du futur', () => {
+    const REJETS = [
+      ['Nous avons fait venir des millions et des millions de gens.', 'passé composé'],
+      ['Nous expulsons que dix pour cent des déboutés.', 'présent'],
+      ["Mais les patrons, c'est fini depuis longtemps.", 'passé — et « patrons » n’est pas un futur simple'],
+      ['Je suis là pour débattre, pas pour répondre à vos questions.', 'aucune projection'],
+    ];
+    for (const [texte, raison] of REJETS) {
+      test(`écarté — ${raison}`, () => assert.equal(gate('PREDICTION', texte), false));
+    }
+
+    const ACCEPTES = [
+      "Je vais réduire l'immigration légale.",
+      "Au bout du mandat d'Emmanuel Macron, il y aura deux millions d'immigrés légaux.",
+      'La laïcité va poser des règles.',
+    ];
+    for (const texte of ACCEPTES) {
+      test(`conservé — « ${texte.slice(0, 40)}… »`, () => assert.equal(gate('PREDICTION', texte), true));
+    }
+  });
+
+  describe('un engagement doit lier le locuteur', () => {
+    test('la simple conduite du débat n’engage à rien', () => {
+      assert.equal(gate('COMMITMENT', 'Je voudrais continuer.'), false);
+      assert.equal(gate('COMMITMENT', 'Maintenant je voudrais continuer.'), false);
+    });
+
+    test('un énoncé long mais non commissif est écarté', () => {
+      // Piège : « sera » marque le futur mais n'engage personne.
+      assert.equal(gate('COMMITMENT', 'Cette réforme sera très importante pour le pays.'), false);
+      assert.equal(gate('COMMITMENT', 'Les élites françaises ont décidé de fermer les usines.'), false);
+    });
+
+    test('une promesse explicite est retenue', () => {
+      assert.equal(gate('COMMITMENT', "Je vais supprimer cette taxe dès la rentrée."), true);
+      assert.equal(gate('COMMITMENT', "Nous allons reprendre le contrôle de nos frontières."), true);
+    });
+  });
+
+  describe('formes inexploitables', () => {
+    test('fragment tronqué', () => {
+      assert.equal(gate('PREDICTION', 'nous avons accumulé'), false);
+    });
+
+    test('bégaiement', () => {
+      assert.equal(gate('COMMITMENT', "Je, je, si vous voulez, ce n'est pas une religion."), false);
+    });
+
+    test('le modèle décrit au lieu de citer', () => {
+      assert.equal(
+        gate('PREDICTION', "Zemmour affirme que les politiques d'immigration vont changer radicalement."),
+        false);
+    });
+
+    test('énoncé vide ou trop bref', () => {
+      assert.equal(gate('PREDICTION', ''), false);
+      assert.equal(gate('PREDICTION', 'Ça ira mieux.'), false);
+    });
+  });
+
+  test('un mot accentué n’est pas pris pour une répétition', () => {
+    // « La laïcité » : la limite de mot de JavaScript ignore les accents et
+    // faisait passer ce début de phrase pour un bégaiement.
+    assert.equal(gate('PREDICTION', 'La laïcité va poser des règles.'), true);
+  });
+
+  test('le filtre en lot écarte les énoncés inexploitables', () => {
+    const items = [
+      { kind: 'PREDICTION', statement: "Je vais réduire l'immigration légale." },
+      { kind: 'PREDICTION', statement: 'Nous avons fait venir des millions de gens.' },
+      { kind: 'COMMITMENT', statement: 'Je voudrais continuer.' },
+      { kind: 'PREDICTION', statement: '[Speaker 0] La laïcité va poser des règles nouvelles.' },
+      null,
+    ];
+    const gardes = st.filterUsableDiscourseItems(items, sw.looksLikeTranscriptionNoise);
+    assert.equal(gardes.length, 2, 'le tri en lot ne correspond pas au tri unitaire');
+  });
+
+  test('le filtre est réellement appliqué avant consignation', () => {
+    const swSrc = readFileSync(join(REPO_ROOT, 'realtime-factcheck', 'src', 'background', 'service-worker.js'), 'utf8');
+    assert.match(swSrc, /const usable = filterUsableDiscourseItems\(discourseItems/,
+      'un énoncé inexploitable ne doit jamais atteindre la mémoire de session');
+    assert.match(swSrc, /const enriched = usable\.map/,
+      'seuls les énoncés retenus doivent être consignés');
+  });
+});
+
+describe('déduplication des énoncés de discours', () => {
+  test('une reprise proche n’est pas consignée deux fois', () => {
+    const st = loadSessionStore();
+    const s = st.createSession({});
+    st.upsertDiscourseEvent(s, { kind: 'COMMITMENT', statement: 'Je voudrais continuer maintenant' });
+    st.upsertDiscourseEvent(s, { kind: 'COMMITMENT', statement: 'Maintenant je voudrais continuer' });
+    assert.equal(s.events.length, 1, 'la reprise orale a créé un doublon');
+  });
+
+  test('deux types différents restent distincts malgré un texte proche', () => {
+    const st = loadSessionStore();
+    const s = st.createSession({});
+    st.upsertDiscourseEvent(s, { kind: 'PREDICTION', statement: 'Cette mesure produira des effets rapides' });
+    st.upsertDiscourseEvent(s, { kind: 'COMMITMENT', statement: 'Cette mesure produira des effets rapides' });
+    assert.equal(s.events.length, 2);
   });
 });
 
