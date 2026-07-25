@@ -1358,7 +1358,9 @@ async function gatherEvidence(queries) {
   if (sensors.has('factcheck') && FACTCHECK_KEY) tasks.push(cachedSensor('factcheck', q0, () => searchFactCheck(q0)));
 
   const groups = await Promise.all(tasks.map(p => Promise.resolve(p).catch(() => [])));
-  const items  = dedupeByLink(groups.flat()).slice(0, 9);
+  // Filtrage à la source : un article hors sujet ne doit ni s'afficher comme
+  // source, ni compter comme voix indépendante dans la corroboration.
+  const items  = filterTitleMatchSensors(q0, dedupeByLink(groups.flat())).slice(0, 9);
   return {
     items,
     sources: items.map(it => it.link),  // URLs affichées dans la carte de verdict
@@ -2788,6 +2790,68 @@ function applyCorroborationGuard(verdict, confidence, c) {
     return { verdict, confidence: hasNum ? Math.min(num, 0.4) : confidence };
   }
   return { verdict, confidence };
+}
+
+// ── Pertinence des capteurs qui répondent par titre ─────────────────────────
+// Wikipédia, Wikidata et Nominatim cherchent un TITRE approchant : une
+// correspondance de surface suffit à ramener un article sans rapport
+// (« Indochine (groupe) » pour une question sur les Jeux Olympiques,
+// « The Cleaning Lady » pour l'immigration). Ces articles étaient ensuite
+// affichés comme sources ET comptés comme voix indépendantes — donnant
+// l'apparence d'un étayage inexistant. On exige donc un recouvrement réel.
+
+const TITLE_MATCH_SENSORS = new Set(['wikipedia', 'wikidata', 'nominatim']);
+
+// Mots trop courants pour signaler quoi que ce soit.
+const TOPIC_STOPWORDS = new Set([
+  'nous','vous','pour','avec','dans','cette','comme','entre','plus','tout','tous',
+  'toute','etre','sont','ceux','celle','leur','leurs','mais','donc','alors','ainsi',
+  'meme','memes','fait','faire','avoir','plusieurs','autre','autres','chez','sans',
+  'this','that','with','from','they','them','their','have','been','were','which',
+  'about','there','these','those','would','could','should','than','then','into',
+]);
+
+/** Radical grossier : suffit à rapprocher « immigrer » et « immigration ». */
+function topicStem(word) {
+  return word.normalize('NFD').replace(/[\u0300-\u036f]/g, '').slice(0, 5);
+}
+
+function topicTokens(text) {
+  const words = String(text || '').toLowerCase().match(/[\p{L}\d]{4,}/gu) || [];
+  const out = new Set();
+  for (const w of words) {
+    if (TOPIC_STOPWORDS.has(w.normalize('NFD').replace(/[\u0300-\u036f]/g, ''))) continue;
+    out.add(topicStem(w));
+  }
+  return out;
+}
+
+/**
+ * L'article traite-t-il réellement du sujet de l'affirmation ?
+ *
+ * Ces capteurs cherchant par TITRE, c'est le titre qui doit partager au moins
+ * un mot significatif avec l'affirmation. Se fier au résumé laisserait passer
+ * n'importe quel article dont l'introduction emploie un mot courant.
+ * Un recouvrement net dans le résumé rattrape le cas d'un titre elliptique.
+ */
+function isTopicallyRelevant(claim, item) {
+  const claimWords = topicTokens(claim);
+  if (claimWords.size < 2) return true;   // trop court pour juger : on laisse passer
+
+  const titleWords = topicTokens(item && item.title);
+  for (const w of claimWords) if (titleWords.has(w)) return true;
+
+  const snippetWords = topicTokens(item && item.snippet);
+  let overlap = 0;
+  for (const w of claimWords) if (snippetWords.has(w)) overlap++;
+  return overlap >= 2 || (overlap >= 1 && overlap / claimWords.size >= 0.33);
+}
+
+/** Écarte les réponses hors sujet des capteurs à correspondance de titre. */
+function filterTitleMatchSensors(claim, items) {
+  return (Array.isArray(items) ? items : []).filter(it =>
+    !it || !TITLE_MATCH_SENSORS.has(it.source) ? true : isTopicallyRelevant(claim, it)
+  );
 }
 
 function relevanceFilterItems(claim, items) {
