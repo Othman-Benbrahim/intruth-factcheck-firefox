@@ -189,11 +189,22 @@ describe('déduplication des énoncés de discours', () => {
     assert.equal(s.events.length, 1, 'la reprise orale a créé un doublon');
   });
 
-  test('deux types différents restent distincts malgré un texte proche', () => {
+  test('un texte identique étiqueté deux fois ne donne qu’un énoncé', () => {
+    // Relevé sur un rapport réel : « Serons nombreux à ne pas vous laisser
+    // faire » (prédiction) et « Nous serons nombreux à ne pas vous laisser
+    // faire » (engagement) sont le même propos, entendu deux fois.
     const st = loadSessionStore();
     const s = st.createSession({});
-    st.upsertDiscourseEvent(s, { kind: 'PREDICTION', statement: 'Cette mesure produira des effets rapides' });
-    st.upsertDiscourseEvent(s, { kind: 'COMMITMENT', statement: 'Cette mesure produira des effets rapides' });
+    st.upsertDiscourseEvent(s, { kind: 'PREDICTION', statement: 'Nous serons nombreux à ne pas vous laisser faire' });
+    st.upsertDiscourseEvent(s, { kind: 'COMMITMENT', statement: 'Serons nombreux à ne pas vous laisser faire' });
+    assert.equal(s.events.length, 1, 'le même propos a été consigné deux fois');
+  });
+
+  test('deux propos distincts restent distincts même de type différent', () => {
+    const st = loadSessionStore();
+    const s = st.createSession({});
+    st.upsertDiscourseEvent(s, { kind: 'PREDICTION', statement: 'Les impôts baisseront dès l’an prochain' });
+    st.upsertDiscourseEvent(s, { kind: 'COMMITMENT', statement: 'Je supprimerai la taxe sur les carburants' });
     assert.equal(s.events.length, 2);
   });
 });
@@ -221,11 +232,11 @@ describe('consignation dans la session', () => {
     assert.equal(s.events.length, 1);
   });
 
-  test('deux types différents restent deux événements', () => {
+  test('un propos différent de même racine reste un second événement', () => {
     const st = loadSessionStore();
     const s = st.createSession({});
     st.upsertDiscourseEvent(s, item('PREDICTION', 'Cette mesure produira des effets rapides'));
-    st.upsertDiscourseEvent(s, item('COMMITMENT', 'Cette mesure produira des effets rapides'));
+    st.upsertDiscourseEvent(s, item('COMMITMENT', 'Je financerai cette mesure par une taxe nouvelle'));
     assert.equal(s.events.length, 2);
   });
 

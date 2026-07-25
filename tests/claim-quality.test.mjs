@@ -173,6 +173,31 @@ describe('étiquette de diarisation dans le texte', () => {
   });
 });
 
+describe('références de sources dans le texte affiché', () => {
+  // Le modèle écrivait « selon [1] » : ces numéros n'existent pas pour le
+  // lecteur, qui ne voit que des liens nommés.
+  test('une référence entre crochets est retirée avec son connecteur', () => {
+    assert.equal(
+      sw.stripSourceReferences("L'islam inclut des principes sociaux, mais n'est pas politique selon [1]."),
+      "L'islam inclut des principes sociaux, mais n'est pas politique.");
+  });
+
+  test('une mention parenthésée est retirée', () => {
+    assert.equal(sw.stripSourceReferences('Le chiffre est confirmé (source 2).'), 'Le chiffre est confirmé.');
+  });
+
+  test('un texte sans référence n’est pas altéré', () => {
+    const texte = 'Le taux de chômage est passé sous les 5 % en 2024.';
+    assert.equal(sw.stripSourceReferences(texte), texte);
+  });
+
+  test('le nettoyage est appliqué à la normalisation', () => {
+    assert.equal(
+      sw.normalizeVerdictItem({ claim: 'Une affirmation quelconque ici.', verdict: 'TRUE', explanation: 'Confirmé [1].' }).explanation,
+      'Confirmé.');
+  });
+});
+
 describe('variantes du nom d’un même locuteur', () => {
   // Le modèle alterne « Mélenchon » et « Jean-Luc Mélenchon » : sans réduction,
   // le rapport affichait deux libellés pour la même personne.

@@ -194,6 +194,23 @@ describe('pertinence des capteurs à correspondance de titre', () => {
       'Nous sommes le seul pays qui dit cela', wiki('Albert (Somme)')), false);
   });
 
+  // Troisième lot : le titre ne doit pas introduire son propre sujet.
+  test('« Affaire Vincent Lambert » n’est pas « une affaire privée »', () => {
+    assert.equal(sw.isTopicallyRelevant('La religion est une affaire privée.', wiki('Affaire Vincent Lambert')), false);
+  });
+
+  test('un titre qui restreint le sujet est écarté', () => {
+    const claim = "La religion, c'est dans le privé.";
+    assert.equal(sw.isTopicallyRelevant(claim, wiki('Religion')), true);
+    assert.equal(sw.isTopicallyRelevant(claim, wiki('Religion dans le Nord-Pas-de-Calais')), false);
+  });
+
+  test('un titre encyclopédique générique ne suffit pas', () => {
+    assert.equal(sw.isTopicallyRelevant(
+      "Le général de Gaulle disait que l'histoire de mon pays commence avec la conversion de Clovis.",
+      wiki('Histoire de la Belgique')), false);
+  });
+
   test('une affirmation trop courte ne fait écarter personne', () => {
     assert.equal(sw.isTopicallyRelevant('oui', wiki('Indochine (groupe)')), true);
   });
