@@ -100,6 +100,79 @@ describe('normalisation des libellés de locuteur', () => {
   });
 });
 
+describe('identification des participants depuis le titre', () => {
+  // Sans participants reconnus, l'apprentissage de la correspondance ne peut
+  // jamais démarrer : toutes les affirmations restent « Inconnu ».
+  const CAS = [
+    ["Eric Zemmour : Mon débat face à Raphaël Glucksmann, l'idiot utile - YouTube", ['Zemmour', 'Glucksmann']],
+    ['Harris vs Trump Presidential Debate', ['Harris', 'Trump']],
+    ['Débat : Jean-Luc Mélenchon contre Éric Zemmour', ['Mélenchon', 'Zemmour']],
+    ['Emmanuel Macron répond à Marine Le Pen', ['Macron', 'Pen']],
+  ];
+
+  for (const [titre, attendu] of CAS) {
+    test(`« ${titre.slice(0, 42)}… » → ${attendu.join(' / ')}`, () => {
+      assert.deepEqual(sw.parseSpeakersFromTitle(titre), attendu);
+    });
+  }
+
+  test('un titre sans confrontation ne produit aucun participant', () => {
+    assert.deepEqual(sw.parseSpeakersFromTitle('Journal télévisé de 20h'), []);
+    assert.deepEqual(sw.parseSpeakersFromTitle('LIVE - Conférence de presse du Premier ministre'), []);
+    assert.deepEqual(sw.parseSpeakersFromTitle('Les Chinois et la voiture électrique en France'), []);
+    assert.deepEqual(sw.parseSpeakersFromTitle(''), []);
+  });
+
+  test('les mots génériques ne sont jamais pris pour des noms', () => {
+    assert.equal(sw.cleanPersonName('Trump Presidential Debate'), 'Trump');
+    assert.equal(sw.cleanPersonName('La France'), null);
+    assert.equal(sw.cleanPersonName('Marine Le Pen'), 'Pen');
+  });
+
+  test('la chaîne complète mène à une attribution', () => {
+    const titre = "Eric Zemmour : Mon débat face à Raphaël Glucksmann - YouTube";
+    const participants = sw.parseSpeakersFromTitle(titre);
+    const premier = sw.learnSpeakerMapping(0, 'Zemmour', participants, {});
+    assert.deepEqual(premier, { id: '0', name: 'Zemmour' });
+    assert.deepEqual(
+      sw.learnSpeakerMapping(1, 'Glucksmann', participants, { '0': 'Zemmour' }),
+      { id: '1', name: 'Glucksmann' });
+  });
+});
+
+describe('étiquette de diarisation dans le texte', () => {
+  // Le transcript envoyé au modèle est préfixé « [Speaker 0] … » ; le modèle
+  // recopiait parfois l'étiquette dans l'affirmation, qui s'affichait telle
+  // quelle dans le rapport.
+  test('le préfixe est retiré de l’affirmation', () => {
+    assert.equal(
+      sw.normalizeVerdictItem({ claim: '[Speaker 0] on emprisonnerait les curés.', verdict: 'TRUE' }).claim,
+      'on emprisonnerait les curés.');
+    assert.equal(
+      sw.normalizeVerdictItem({ claim: '[Zemmour] La laïcité découle des guerres de religion.', verdict: 'TRUE' }).claim,
+      'La laïcité découle des guerres de religion.');
+  });
+
+  test('une affirmation sans préfixe n’est pas altérée', () => {
+    const texte = 'Le taux de chômage est inférieur à 5 %.';
+    assert.equal(sw.normalizeVerdictItem({ claim: texte, verdict: 'TRUE' }).claim, texte);
+  });
+
+  test('un crochet en milieu de phrase est préservé', () => {
+    const texte = 'Le taux [sic] a baissé de 2 %.';
+    assert.equal(sw.normalizeVerdictItem({ claim: texte, verdict: 'TRUE' }).claim, texte);
+  });
+
+  test('les énoncés de discours sont nettoyés de la même façon', () => {
+    const src = serviceWorkerSrc.match(/const enriched = discourseItems\.map[\s\S]{0,400}?\}\)\);/);
+    assert.ok(src, 'enrichissement des énoncés de discours introuvable');
+    assert.match(src[0], /statement:[\s\S]{0,120}replace\(/,
+      'le préfixe doit être retiré de l’énoncé');
+    assert.match(src[0], /normalizeSpeakerLabel\(it\.speaker\)/,
+      '« Speaker 1 » ne doit pas s’afficher comme nom de locuteur');
+  });
+});
+
 describe('apprentissage de la correspondance locuteur', () => {
   const PARTICIPANTS = ['Zemmour', 'Glucksmann'];
 
