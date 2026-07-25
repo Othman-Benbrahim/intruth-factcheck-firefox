@@ -146,6 +146,8 @@ const OVERLAY_EXPORTS = `{
 const SESSION_EXPORTS = `{
   EVENT_TYPES, EVENT_STATUS, DISCOURSE_TYPES, MAX_EVENTS,
   discourseKindOf, discourseStatement, splitDiscourseItems, upsertDiscourseEvent,
+  isUsableDiscourseStatement, FUTURE_MARKERS, COMMISSIVE_MARKERS,
+  filterUsableDiscourseItems,
   makeEventId, claimFingerprint, claimSimilarity,
   createSession, endSession, isSessionActive,
   findClaimEvent, claimEventFromResult, upsertClaimEvent, setSessionSpeakers,
