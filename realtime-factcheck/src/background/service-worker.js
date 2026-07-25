@@ -840,6 +840,146 @@ async function fetchEspn(query) {
   return out.slice(0, 4);
 }
 
+// ── EUR-Lex — droit de l'Union européenne (sans clé) ─────────────────────────
+// Table d'actes notoires (déterministe, sans réseau) + recherche SPARQL CELLAR
+// en complément « meilleur effort ». Dégradation propre si CELLAR est indispo.
+const EU_MARKERS = /(?:\b(?:union europ[ée]enne|europ[ée]en\w*|bruxelles|commission europ[ée]enne|parlement europ[ée]en|conseil de l['’]union|eur-?lex|celex|communautaire|rgpd|gdpr|schengen|dublin|directive)\b)|\(\s*(?:ue|eu)\s*\)/i;
+
+const EU_KNOWN_ACTS = [
+  { re: /\b(rgpd|gdpr|r[èe]glement g[ée]n[ée]ral sur la protection des donn[ée]es)\b/i,
+    celex: '32016R0679', title: 'Règlement (UE) 2016/679 — protection des données (RGPD)', date: '2016-04-27' },
+  { re: /\b(dsa|digital services act|r[èe]glement sur les services num[ée]riques)\b/i,
+    celex: '32022R2065', title: 'Règlement (UE) 2022/2065 — services numériques (DSA)', date: '2022-10-19' },
+  { re: /\b(dma|digital markets act|r[èe]glement sur les march[ée]s num[ée]riques)\b/i,
+    celex: '32022R1925', title: 'Règlement (UE) 2022/1925 — marchés numériques (DMA)', date: '2022-09-14' },
+  { re: /\b(ai act|r[èe]glement (?:sur l['’])?intelligence artificielle|r[èe]glement ia)\b/i,
+    celex: '32024R1689', title: "Règlement (UE) 2024/1689 — intelligence artificielle (AI Act)", date: '2024-06-13' },
+  { re: /\b(loi europ[ée]enne sur le climat|european climate law)\b/i,
+    celex: '32021R1119', title: 'Règlement (UE) 2021/1119 — loi européenne sur le climat', date: '2021-06-30' },
+  { re: /\b(travailleurs d[ée]tach[ée]s|posted workers)\b/i,
+    celex: '31996L0071', title: 'Directive 96/71/CE — détachement de travailleurs', date: '1996-12-16' },
+  { re: /\b(directive.cadre sur l['’]eau|water framework directive)\b/i,
+    celex: '32000L0060', title: 'Directive 2000/60/CE — directive-cadre sur l\u2019eau', date: '2000-10-23' },
+  { re: /\b(directive habitats?|habitats directive|natura 2000)\b/i,
+    celex: '31992L0043', title: 'Directive 92/43/CEE — habitats naturels (Natura 2000)', date: '1992-05-21' },
+  { re: /\b(code fronti[èe]res schengen|schengen borders code)\b/i,
+    celex: '32016R0399', title: 'Règlement (UE) 2016/399 — code frontières Schengen', date: '2016-03-09' },
+  { re: /\b(dublin (?:iii|3)|r[èe]glement de dublin)\b/i,
+    celex: '32013R0604', title: 'Règlement (UE) 604/2013 — Dublin III (asile)', date: '2013-06-26' },
+  { re: /\b(nis ?2|directive nis)\b/i,
+    celex: '32022L2555', title: 'Directive (UE) 2022/2555 — cybersécurité (NIS2)', date: '2022-12-14' },
+  { re: /\b(csrd|reporting de durabilit[ée])\b/i,
+    celex: '32022L2464', title: 'Directive (UE) 2022/2464 — informations de durabilité (CSRD)', date: '2022-12-14' },
+  { re: /\b(mica|march[ée]s de crypto.?actifs)\b/i,
+    celex: '32023R1114', title: 'Règlement (UE) 2023/1114 — marchés de crypto-actifs (MiCA)', date: '2023-05-31' },
+  { re: /\b(directive retour|return directive)\b/i,
+    celex: '32008L0115', title: 'Directive 2008/115/CE — retour des ressortissants de pays tiers', date: '2008-12-16' },
+];
+
+function eurLexLink(celex) { return 'https://eur-lex.europa.eu/legal-content/FR/TXT/?uri=CELEX:' + celex; }
+
+function matchEuKnownActs(query) {
+  const q = String(query || '');
+  return EU_KNOWN_ACTS.filter(a => a.re.test(q)).slice(0, 2).map(a => ({
+    source: 'eurlex', title: a.title,
+    snippet: `CELEX ${a.celex} · adopté le ${a.date} · texte officiel EUR-Lex`,
+    link: eurLexLink(a.celex),
+  }));
+}
+
+function buildEurLexSparql(query) {
+  const stop = new Set(['dans','pour','avec','sans','cette','leurs','selon','entre','depuis','contre','being','their','which','about','after','under','while','loi','lois','the','and']);
+  const terms = (String(query || '').toLowerCase().match(/[a-zà-ÿ]{5,}/gi) || [])
+    .map(t => t.replace(/['"\\]/g, '')).filter(t => !stop.has(t)).slice(0, 3);
+  if (!terms.length) return null;
+  const contains = terms.map(t => `'${t}'`).join(' AND ');
+  return [
+    'PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>',
+    'PREFIX lang: <http://publications.europa.eu/resource/authority/language/>',
+    'SELECT DISTINCT ?celex ?title ?date WHERE {',
+    ' ?work cdm:resource_legal_id_celex ?celex .',
+    ' ?work cdm:work_date_document ?date .',
+    ' ?exp cdm:expression_belongs_to_work ?work .',
+    ' ?exp cdm:expression_uses_language lang:FRA .',
+    ' ?exp cdm:expression_title ?title .',
+    ` ?title bif:contains "${contains}" .`,
+    '} ORDER BY DESC(?date) LIMIT 4',
+  ].join('\n');
+}
+
+async function fetchEurLex(query) {
+  const known = matchEuKnownActs(query);
+  let found = [];
+  try {
+    const sparql = buildEurLexSparql(query);
+    if (sparql) {
+      const url = 'https://publications.europa.eu/webapi/rdf/sparql?' + new URLSearchParams({
+        query: sparql, format: 'application/sparql-results+json',
+      }).toString();
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = controller ? setTimeout(() => controller.abort(), 6000) : null;
+      try {
+        const res  = await fetch(url, { signal: controller?.signal });
+        const data = await res.json().catch(() => ({}));
+        found = ((data.results && data.results.bindings) || []).map(b => {
+          const celex = b.celex && b.celex.value;
+          const title = (b.title && b.title.value) || '';
+          const date  = (b.date && b.date.value) || '';
+          if (!celex || !title) return null;
+          return { source: 'eurlex', title: title.trim(),
+            snippet: `CELEX ${celex}${date ? ' · ' + String(date).slice(0, 10) : ''} · texte officiel EUR-Lex`,
+            link: eurLexLink(celex) };
+        }).filter(Boolean);
+      } finally { if (timer) clearTimeout(timer); }
+    }
+  } catch (err) { console.error('[eurlex] sparql indisponible:', err && err.message); }
+  const seen = new Set(known.map(k => k.link));
+  const out = known.slice();
+  for (const it of found) { if (!seen.has(it.link)) { seen.add(it.link); out.push(it); } }
+  return out.slice(0, 4);
+}
+
+// ── Federal Register — actes de l'exécutif fédéral US (sans clé) ─────────────
+// Couvre : executive orders, règlements d'agences (EPA, FDA…), avis fédéraux.
+// NE couvre PAS les lois votées par le Congrès (→ Congress.gov, clé requise).
+// Marqueurs distinctifs pour éviter le « Sénat » français (≠ "senate" US).
+const US_MARKERS = /(?:\b(?:congress|congressional|executive order|white house|house of representatives|federal register|federal government|federal court|potus|senate bill|house bill|code of federal regulations|\bcfr\b|\bepa\b|\bfda\b|\bftc\b|\bfcc\b|\bdoj\b|\bosha\b|\bnhtsa\b)\b)|(?:\bu\.?s\.?\s+(?:senate|congress|code|law|supreme court)\b)|(?:\bcongr[èe]s am[ée]ricain\b)|(?:\bmaison.blanche\b)|(?:\bd[ée]cret pr[ée]sidentiel am[ée]ricain\b)/i;
+
+const US_STOPWORDS = new Set(['the','and','for','with','that','this','from','have','been','will','which','about','after','under','while','their','would','could','should','federal','order','rule','rules','law','laws','bill','act','have','they','when','were']);
+function usLegalTerms(query) {
+  return (String(query || '').toLowerCase().match(/[a-z]{4,}/g) || [])
+    .filter(t => !US_STOPWORDS.has(t)).slice(0, 6);
+}
+
+const FEDREG_TYPES = { RULE: 'Règlement final', PRORULE: 'Projet de règlement', NOTICE: 'Avis fédéral', PRESDOCU: 'Document présidentiel' };
+
+async function fetchFederalRegister(query) {
+  const terms = usLegalTerms(query);
+  if (!terms.length) return [];
+  const params = new URLSearchParams({
+    'conditions[term]': terms.join(' '), 'per_page': '5', 'order': 'relevance',
+  }).toString();
+  const fields = ['title','publication_date','html_url','type','document_number']
+    .map(f => 'fields[]=' + f).join('&');
+  const url = 'https://www.federalregister.gov/api/v1/documents.json?' + params + '&' + fields;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 6000) : null;
+  try {
+    const res  = await fetch(url, { signal: controller?.signal });
+    const data = await res.json().catch(() => ({}));
+    return ((data && data.results) || []).map(r => {
+      if (!r || !r.title || !r.html_url) return null;
+      const t = FEDREG_TYPES[r.type] || r.type || 'Document fédéral';
+      return { source: 'fedreg', title: String(r.title).trim(),
+        snippet: `${t}${r.publication_date ? ' · ' + r.publication_date : ''} · Federal Register (US)`,
+        link: r.html_url };
+    }).filter(Boolean).slice(0, 4);
+  } catch (err) {
+    console.error('[fedreg] erreur:', err && err.message);
+    return [];
+  } finally { if (timer) clearTimeout(timer); }
+}
+
 async function fetchGdelt(query) {
   try {
     const url = 'https://api.gdeltproject.org/api/v2/doc/doc?' + new URLSearchParams({
@@ -1100,6 +1240,7 @@ async function cachedSensor(sensor, q, fn) {
 // Évite de lancer 10 requêtes par phrase (et de se faire bannir).
 
 const SENSOR_KEYWORDS = {
+  law:     /(?:\b(?:loi|lois|d[ée]cret|ordonnance|amendement|projet de loi|proposition de loi|promulgu\w*|abrog\w*|l[ée]gislation|l[ée]gislati\w+|jurisprudence|journal officiel|code (?:civil|p[ée]nal|du travail|de commerce)|entr[ée]e? en vigueur|transposition|bill|statute|legislation|enacted|repealed|amendment)\b)|(?:\b(?:directive|r[èe]glement|regulation)\s*(?:europ[ée]enne?|\(\s*(?:ue|eu)\s*\)|\d))|(?:\barticle\s+\d+\s+(?:du|de la)\b)/i,
   sport:   /\b(match|matchs|championnat|tournoi|playoffs?|penalty|mi-temps|prolongation|carton rouge|carton jaune|corner|hat.?trick|touchdown|quarterback|home run|nba|nfl|mlb|nhl|mls|wnba|premier league|champions league|ligue des champions|ligue 1|la liga|bundesliga|serie a|super ?bowl|coupe du monde|world cup|roland.?garros|wimbledon|tour de france|ballon d.or|grand prix|formule ?1|formula ?1|real madrid|barcelone|barcelona|bar[çc]a|juventus|\bjuve\b|bayern|dortmund|liverpool|chelsea|arsenal|tottenham|atl[ée]tico|\bpsg\b|\bom\b|lakers|celtics|warriors|yankees|mbapp[ée]|messi|ronaldo|neymar|lebron|federer|nadal|djokovic)\b/i,
   health:  /\b(virus|vaccin\w*|sant[ée]|maladie|m[ée]dica\w*|clinique|patient|cancer|covid|[ée]pid[ée]mie|pand[ée]mie|\boms\b|th[ée]rapie|sympt[ôo]me|health|vaccine|disease|drug|clinical|\bwho\b)\b/i,
   economy: /\b(pib|inflation|dette|ch[ôo]mage|croissance|d[ée]ficit|budget|gdp|unemployment|debt|deficit|recession|economic)\b/i,
@@ -1119,6 +1260,10 @@ function routeSensors(text) {
   if (SENSOR_KEYWORDS.science.test(t)) { sensors.add('openalex');  sensors.add('crossref'); }
   if (SENSOR_KEYWORDS.economy.test(t)) { sensors.add('worldbank'); }
   if (SENSOR_KEYWORDS.geo.test(t))     { sensors.add('nominatim'); }
+  // Droit : capteurs officiels sans clé, aiguillés par juridiction.
+  const isLaw = SENSOR_KEYWORDS.law.test(t);
+  if ((isLaw && EU_MARKERS.test(t)) || matchEuKnownActs(t).length) sensors.add('eurlex');
+  if (US_MARKERS.test(t)) sensors.add('fedreg');
   // Sources à clé : tentées si la clé est présente (sinon court-circuit interne)
   sensors.add('web');
   sensors.add('factcheck');
@@ -1150,6 +1295,8 @@ function buildEvidenceText(items) {
     s === 'worldbank'   ? 'Banque Mondiale' :
     s === 'nominatim'   ? 'Géo (OpenStreetMap)' :
     s === 'espn'        ? 'Résultat sportif (ESPN)' :
+    s === 'eurlex'      ? "Droit de l'UE (EUR-Lex)" :
+    s === 'fedreg'      ? 'Registre fédéral US (Federal Register)' :
     s === 'factcheck'   ? 'Fact-check existant' : 'Source';
   return items.map((it, i) => {
     let domain = '';
@@ -1174,6 +1321,8 @@ async function gatherEvidence(queries) {
   if (sensors.has('wikipedia')) tasks.push(cachedSensor('wikipedia', q0, () => searchWikipedia(q0)));
   if (sensors.has('wikidata'))  tasks.push(cachedSensor('wikidata',  q0, () => fetchWikidata(q0)));
   if (sensors.has('gdelt'))     tasks.push(cachedSensor('gdelt',     q0, () => fetchGdelt(q0)));
+  if (sensors.has('eurlex'))    tasks.push(cachedSensor('eurlex',    routeText, () => fetchEurLex(routeText)));
+  if (sensors.has('fedreg'))    tasks.push(cachedSensor('fedreg',    routeText, () => fetchFederalRegister(routeText)));
   if (sensors.has('espn'))      tasks.push(cachedSensor('espn',      q0, () => fetchEspn(q0)));
   if (sensors.has('europepmc')) tasks.push(cachedSensor('europepmc', q0, () => fetchEuropePmc(q0)));
   if (sensors.has('openalex'))  tasks.push(cachedSensor('openalex',  q0, () => fetchOpenAlex(q0)));
@@ -2500,7 +2649,7 @@ function jaccardSim(a, b) {
 
 // Crédibilité par TYPE de capteur (signaux, jamais réputation média). 0..1.
 const SOURCE_CREDIBILITY = {
-  worldbank: 1.0, crossref: 0.95, openalex: 0.9, europepmc: 0.9,
+  worldbank: 1.0, eurlex: 1.0, fedreg: 1.0, crossref: 0.95, openalex: 0.9, europepmc: 0.9,
   factcheck: 0.85, espn: 0.85, wikidata: 0.75, wikipedia: 0.7,
   gdelt: 0.5, web: 0.5,
 };
@@ -2509,7 +2658,7 @@ function sourceCredibility(src) {
 }
 
 // Sources « primaires / officielles » : leur seule présence sort de FAIBLE.
-const CORRO_PRIMARY = new Set(['worldbank', 'crossref', 'openalex', 'europepmc', 'factcheck']);
+const CORRO_PRIMARY = new Set(['worldbank', 'eurlex', 'fedreg', 'crossref', 'openalex', 'europepmc', 'factcheck']);
 
 // Union-find : deux items dans la même voix si même domaine OU quasi-doublon lexical.
 function clusterEvidence(items, threshold) {
