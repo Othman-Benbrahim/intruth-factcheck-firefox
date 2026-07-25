@@ -129,6 +129,7 @@ const SW_EXPORTS = `{
   extractLexical, parseSpeakersFromTitle,
   relevanceFilterItems, selectCitedSources, dedupeByLink,
   isTopicallyRelevant, filterTitleMatchSensors, topicTokens, TITLE_MATCH_SENSORS,
+  looksLikeTranscriptionNoise, normalizeSpeakerLabel, learnSpeakerMapping, matchKnownParticipant,
   normalizeClaimKey, languageInstruction, LANGUAGE_NAMES, LANGUAGE_LOCALE
 }`;
 
