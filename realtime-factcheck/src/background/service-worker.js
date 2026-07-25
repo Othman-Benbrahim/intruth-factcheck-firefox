@@ -2571,19 +2571,20 @@ async function evaluateClaims(contextText, title, lexicalSummary, lexicalSnapsho
       return;
     }
 
+    const fastPayload = valid.map(r => ({
+      ...r,
+      sources:            [],
+      pending:            true,
+      lexical:            lexicalSnapshot,
+      speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot),
+      dominantSpeakerId,
+      speaker:            dominantSpeaker || (r.speaker && !r.speaker.match(/^Speaker\s*\d+$/i) ? r.speaker : null),
+    }));
+
+    recordClaimResults(fastPayload);
+
     if (activeTabId) {
-      browserAPI.tabs.sendMessage(activeTabId, {
-        type: 'NEW_VERDICT',
-        results: valid.map(r => ({
-          ...r,
-          sources:          [],
-          pending:          true,
-          lexical:          lexicalSnapshot,
-          speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot),
-          dominantSpeakerId,
-          speaker:          dominantSpeaker || (r.speaker && !r.speaker.match(/^Speaker\s*\d+$/i) ? r.speaker : null),
-        })),
-      }).catch(() => {});
+      browserAPI.tabs.sendMessage(activeTabId, { type: 'NEW_VERDICT', results: fastPayload }).catch(() => {});
       console.log('[pipeline] fast verdicts sent:', valid.length, '| speaker:', dominantSpeaker);
       setAnalysisDebug('fast_verdicts_sent', { count: valid.length, claims: valid.map(r => r.claim).slice(0, 3) });
     }
@@ -2865,6 +2866,7 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
     }));
 
     const valid = groundedAll.filter(Boolean);
+    recordClaimResults(valid);
     if (valid.length && activeTabId) {
       browserAPI.tabs.sendMessage(activeTabId, { type: 'UPDATE_VERDICTS', results: valid }).catch(() => {});
       console.log('[pipeline] grounded verdicts sent:', valid.length);
@@ -3055,6 +3057,24 @@ function connectDeepgram() {
 
 let activeTabId = null;
 let isCapturing = false;
+
+// ── Mémoire de session ──────────────────────────────────────────────────────
+// Source de vérité de l'historique, persistée hors de la page. Toute écriture
+// est protégée : un défaut du magasin ne doit jamais interrompre le pipeline.
+let currentSession = null;
+
+function sessionSafe(label, fn) {
+  try { return fn(); }
+  catch (err) { console.error('[session] ' + label + ' :', err && err.message); return null; }
+}
+
+function recordClaimResults(results) {
+  if (!currentSession || !Array.isArray(results)) return;
+  sessionSafe('enregistrement', () => {
+    for (const r of results) upsertClaimEvent(currentSession, r);
+    scheduleSessionSave(currentSession);
+  });
+}
 let keepAliveInterval = null;
 
 function startKeepAlive() {
@@ -3069,6 +3089,20 @@ function stopKeepAlive() {
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 browserAPI.runtime.onConnect.addListener(() => console.log('[service-worker] woken by port connect'));
+
+// L'event page peut être suspendue en cours de session : on récupère la
+// mémoire de session au réveil plutôt que de repartir de zéro.
+(async () => {
+  try {
+    const restored = await loadStoredSession();
+    if (restored && isSessionActive(restored)) {
+      currentSession = restored;
+      console.log('[session] restaurée :', restored.events.length, 'événements');
+    }
+  } catch (err) {
+    console.error('[session] restauration impossible :', err && err.message);
+  }
+})();
 
 browserAPI.runtime.onStartup.addListener(() => {
   isCapturing = false;
@@ -3127,6 +3161,12 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       break;
 
     case 'SPEAKER_NAMES':
+      if (currentSession && msg.speakerIdToName) {
+        sessionSafe('locuteurs', () => {
+          setSessionSpeakers(currentSession, msg.speakerIdToName);
+          scheduleSessionSave(currentSession);
+        });
+      }
       if (msg.speakerIdToName) {
         Object.entries(msg.speakerIdToName).forEach(([id, name]) => {
           const numId = parseInt(id);
@@ -3140,6 +3180,14 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       break;
 
     case 'PAGE_TITLE':
+      if (currentSession) {
+        sessionSafe('source', () => {
+          currentSession.source.title = msg.title || currentSession.source.title;
+          currentSession.source.date  = msg.date  || currentSession.source.date;
+          if (sender && sender.tab && sender.tab.url) currentSession.source.url = sender.tab.url;
+          scheduleSessionSave(currentSession);
+        });
+      }
       pageTitle = msg.title || '';
       pageDate  = msg.date  || '';
       console.log('[service-worker] page title:', pageTitle.slice(0, 60));
@@ -3156,6 +3204,25 @@ browserAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         .then((result) => sendResponse(result))
         .catch((err) => sendResponse({ ok: false, message: err.message || 'Validation impossible.' }));
       return true;
+
+    case 'GET_SESSION':
+      // L'export lit la session depuis le background : elle survit à une
+      // navigation ou à un rechargement de la page.
+      (async () => {
+        let session = currentSession;
+        if (!session) session = await loadStoredSession();
+        sendResponse({
+          session: session ? serializeSession(session) : null,
+          summary: session ? sessionSummary(session) : null,
+        });
+      })();
+      return true;
+
+    case 'CLEAR_SESSION':
+      currentSession = null;
+      clearStoredSession();
+      sendResponse({ ok: true });
+      break;
 
     case 'GET_STATUS':
       sendResponse(buildStatusResponse());
@@ -3182,6 +3249,9 @@ async function startFactCheck() {
   const [tab] = await browserAPI.tabs.query({ active: true, currentWindow: true });
   if (!tab) throw new Error('No active tab found.');
   activeTabId = tab.id;
+
+  currentSession = sessionSafe('création', () => createSession({ title: pageTitle, date: pageDate }));
+  if (currentSession) saveSessionNow(currentSession);
 
   clearPipelineError('new-session');
   lastAnalysisDebug = null;
@@ -3210,6 +3280,10 @@ function stopFactCheck() {
 
   if (deepgramSocket) { deepgramSocket.close(); deepgramSocket = null; }
   utteranceBuffer = '';
+
+  if (currentSession) {
+    sessionSafe('clôture', () => { endSession(currentSession); saveSessionNow(currentSession); });
+  }
 
   clearPipelineError('stopped');
   lastAnalysisDebug = null;
