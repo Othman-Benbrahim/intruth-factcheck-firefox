@@ -1,11 +1,9 @@
-# Service worker contains API keys 
-src/background/service-worker.js
-src/offscreen/offscreen.js
+# Outillage de test (aucune dependance, mais npm peut creer ces fichiers)
+node_modules/
+package-lock.json
 
-# OS
+# OS / editeurs
 .DS_Store
 Thumbs.db
-
-# Editor
 .vscode/
 .idea/
