@@ -1,9 +1,11 @@
-# Outillage de test (aucune dependance, mais npm peut creer ces fichiers)
-node_modules/
-package-lock.json
+# Service worker contains API keys 
+src/background/service-worker.js
+src/offscreen/offscreen.js
 
-# OS / editeurs
+# OS
 .DS_Store
 Thumbs.db
+
+# Editor
 .vscode/
 .idea/
