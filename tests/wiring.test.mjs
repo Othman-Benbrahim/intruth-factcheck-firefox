@@ -161,6 +161,34 @@ describe('revue de session — garde-fous', () => {
   });
 });
 
+describe('reprise du panneau sans recharger la page', () => {
+  test('un démarrage sur session active rattache au lieu de ne rien faire', () => {
+    const start = serviceWorker.match(/async function startFactCheck[\s\S]*?\n}/);
+    assert.ok(start, 'startFactCheck introuvable');
+    assert.match(start[0], /if \(isCapturing\)[\s\S]{0,200}reattachPanel\(/,
+      'un appel sur session active doit remonter le panneau');
+  });
+
+  test('le rattachement est atteignable depuis le popup', () => {
+    assert.match(serviceWorker, /case 'REATTACH_PANEL'/);
+    const popup = read('src', 'popup', 'popup.js');
+    assert.match(popup, /REATTACH_PANEL/, 'le popup doit pouvoir demander la réouverture');
+  });
+
+  test('une seule implémentation partagée par le popup et le rechargement', () => {
+    const calls = (serviceWorker.match(/reattachPanel\(/g) || []).length;
+    assert.ok(calls >= 3, `attendu au moins 3 usages (définition + 2 appelants), trouvé ${calls}`);
+    assert.equal((serviceWorker.match(/async function reattachPanel/g) || []).length, 1,
+      'une seule définition attendue');
+  });
+
+  test('le rattachement échoue proprement hors session', () => {
+    const fn = serviceWorker.match(/async function reattachPanel[\s\S]*?\n}/);
+    assert.match(fn[0], /no-session/);
+    assert.match(fn[0], /no-content-script/);
+  });
+});
+
 describe('ordre des content scripts', () => {
   const js = manifest.content_scripts[0].js;
 
