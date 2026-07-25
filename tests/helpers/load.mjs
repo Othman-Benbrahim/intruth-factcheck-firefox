@@ -130,6 +130,7 @@ const SW_EXPORTS = `{
   relevanceFilterItems, selectCitedSources, dedupeByLink,
   isTopicallyRelevant, filterTitleMatchSensors, topicTokens, TITLE_MATCH_SENSORS,
   looksLikeTranscriptionNoise, normalizeSpeakerLabel, learnSpeakerMapping, matchKnownParticipant,
+  normalizeVerdictItem, cleanPersonName, TITLE_NON_NAMES,
   normalizeClaimKey, languageInstruction, LANGUAGE_NAMES, LANGUAGE_LOCALE
 }`;
 
