@@ -523,17 +523,21 @@ function discourseInstruction() {
   if (!DISCOURSE_ENABLED) return '';
   return `
 
-ADDITIONAL TASK — discourse detection.
-Besides factual claims, also report statements that are NOT fact-checkable now but matter for later review:
-- PREDICTION: an explicit statement about a future outcome ("unemployment will fall next year").
-- COMMITMENT: an explicit promise or pledge by the speaker ("I will cut taxes").
-Add them to the SAME array, using this shape:
-{ "kind": "PREDICTION" | "COMMITMENT", "statement": "short quote of the statement", "speaker": "name or Unknown", "horizon": "stated deadline or null" }
-Rules for these items:
-- NEVER give them a verdict, a truth value or a confidence. They are recorded, not judged.
-- At most 2 per response, in addition to the factual claims.
-- Only report them when the wording is explicit. If in doubt, omit the item.
-- A statement about the past or present is a factual claim, not a PREDICTION.`;
+ALSO detect, in the same array, up to 2 non-checkable statements:
+{ "kind": "PREDICTION" | "COMMITMENT", "statement": "short quote", "speaker": "name or Unknown", "horizon": "deadline or null" }
+PREDICTION = explicit statement about the future. COMMITMENT = explicit promise by the speaker.
+Never give them a verdict or a confidence. Past or present wording is a claim, not a prediction. If in doubt, omit.`;
+}
+
+// La revue a son propre schéma : lui envoyer la consigne des verdicts (qui
+// nomme "claim" et "explanation") revient à ne rien demander — le modèle
+// répondait alors en anglais.
+// « quote » reste dans la langue d'origine : traduire une citation la rendrait
+// introuvable dans le transcript, et le filtre l'écarterait.
+function reviewLanguageInstruction() {
+  const name = LANGUAGE_NAMES[OUTPUT_LANGUAGE];
+  if (!name) return '';
+  return `\n\nLANGUAGE REQUIREMENT: write "summary", "patterns", "criterion" and "unresolved" in ${name}. Keep the JSON keys and the "type" values in English. Copy "quote" verbatim from the list, in its original language — never translate it.`;
 }
 
 function languageInstruction() {
@@ -2902,8 +2906,19 @@ async function groundAndUpdate(contextText, fastResults, title, lexicalSummary, 
         const groundedIsMisleading = match.verdict === 'MISLEADING';
         const finalVerdict = (fastWasTrue && groundedIsMisleading) ? fastResult.verdict : match.verdict;
 
-        const guarded = applyCorroborationGuard(finalVerdict, match.confidence, corroboration);
-        return { ...match, verdict: guarded.verdict, confidence: guarded.confidence, corroboration, sources: selectCitedSources(match, urlGroups, fastResult.claim), pending: false, lexical: lexicalSnapshot, speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot), speaker: resolvedSpeaker, dominantSpeakerId };
+        // La corroboration calculée avant l'appel sert à cadrer le prompt.
+        // Pour le garde-fou, on recalcule sur les sources que le modèle a
+        // réellement citées : sans cela, un filtrage de pertinence trop strict
+        // affichait « 0 voix indépendante » alors qu'une source était produite,
+        // et forçait un UNVERIFIABLE injustifié.
+        const citedLinks = selectCitedSources(match, urlGroups, fastResult.claim);
+        const citedItems = (urlGroups.items || []).filter(it => citedLinks.includes(it.link));
+        const finalCorroboration = citedItems.length
+          ? computeCorroboration(citedItems)
+          : corroboration;
+
+        const guarded = applyCorroborationGuard(finalVerdict, match.confidence, finalCorroboration);
+        return { ...match, verdict: guarded.verdict, confidence: guarded.confidence, corroboration: finalCorroboration, sources: citedLinks, pending: false, lexical: lexicalSnapshot, speaker_confidence: speakerConfidenceFromLexical(lexicalSnapshot), speaker: resolvedSpeaker, dominantSpeakerId };
       } catch (err) {
         console.error('[grounded] error:', fastResult.claim.slice(0, 40), err);
         return null;
@@ -3195,7 +3210,7 @@ async function runSessionReview(session) {
 
   const userMessage =
     `${header}Recorded events (${digest.lines.length}):\n${digest.lines.join('\n')}${noticeTruncated}` +
-    languageInstruction();
+    reviewLanguageInstruction();
 
   const raw = await callLLM(userMessage, REVIEW_PROMPT);
   const parsed = parseObjectLoose(raw);
